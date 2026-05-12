@@ -368,13 +368,15 @@ def parse_args() -> argparse.Namespace:
         "--with-form",
         action="store_true",
         help="Incluir features de forma reciente y rest days (más lento).",
-    )    parser.add_argument(
+    )
+    parser.add_argument(
         "--optimize",
         type=int,
         default=0,
         metavar="N",
         help="N\u00famero de trials Optuna para optimizar hiperpar\u00e1metros XGBoost (0=desactivado).",
-    )    parser.add_argument(
+    )
+    parser.add_argument(
         "--version",
         type=str,
         default="v1",
