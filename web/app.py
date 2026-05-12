@@ -48,7 +48,57 @@ app.add_middleware(
 
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 _TEAMS_MAP: dict[int, str] = {t["id"]: t["full_name"] for t in nba_teams_static.get_teams()}
+
+
+@app.on_event("startup")
+async def _startup_preload() -> None:
+    """Pre-carga stats de equipo en un hilo para que el primer request sea rápido."""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _get_team_stats_cached)
+    logger.info("Startup: pre-carga de team stats lanzada en background")
 _CACHE: dict[str, dict] = {}
+
+# Caché de stats de equipo (se renueva cada 6 h para no saturar la NBA API en cada request)
+_TEAM_STATS_CACHE: dict = {"df": None, "ts": 0.0}
+_TEAM_STATS_TTL = 6 * 3600   # segundos
+
+# Caché de cuotas por fecha (30 min) para evitar scraping repetido
+_ODDS_CACHE: dict[str, dict] = {}   # key: date_str -> {"df": DataFrame, "ts": float}
+_ODDS_TTL = 30 * 60   # 30 minutos
+
+def _get_team_stats_cached() -> "pd.DataFrame":
+    """Devuelve stats de equipo cacheadas; recarga si TTL expiró o primera vez."""
+    import time
+    now = time.time()
+    if _TEAM_STATS_CACHE["df"] is None or (now - _TEAM_STATS_CACHE["ts"]) > _TEAM_STATS_TTL:
+        try:
+            df = get_combined_team_stats(NBA_SEASON)
+        except Exception as exc:
+            logger.warning("get_combined_team_stats falló (%s) — usando stats básicas", exc)
+            df = get_team_stats(NBA_SEASON)
+        _TEAM_STATS_CACHE["df"] = df
+        _TEAM_STATS_CACHE["ts"] = now
+        logger.info("Team stats cacheadas: %d equipos, %d cols", len(df), len(df.columns))
+    return _TEAM_STATS_CACHE["df"]
+
+
+def _get_odds_cached(games_df: "pd.DataFrame", date_str: str) -> "pd.DataFrame":
+    """Devuelve cuotas cacheadas por fecha; vuelve a scrapear si TTL expiró."""
+    import time
+    now = time.time()
+    cached = _ODDS_CACHE.get(date_str)
+    if cached and (now - cached["ts"]) < _ODDS_TTL:
+        logger.info("Cuotas para %s servidas desde caché", date_str)
+        return cached["df"]
+    try:
+        df = get_odds(games_df)
+    except Exception as exc:
+        logger.warning("get_odds falló: %s — devolviendo DataFrame vacío", exc)
+        df = pd.DataFrame()
+    _ODDS_CACHE[date_str] = {"df": df, "ts": now}
+    logger.info("Cuotas para %s cacheadas (%d filas)", date_str, len(df))
+    return df
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -146,16 +196,19 @@ def _run_pipeline(date_str: str) -> dict:
             "summary": {"total_games": 0, "value_bets_count": 0, "best_opportunity": None},
         }
 
-    # 2. Team stats (básicas + avanzadas ORTG/DRTG/Pace/TS%)
-    try:
-        team_stats_df = get_combined_team_stats(NBA_SEASON)
-    except Exception as exc:
-        logger.warning("get_combined_team_stats falló (%s) — usando stats básicas", exc)
-        team_stats_df = get_team_stats(NBA_SEASON)
+    # 2. Team stats (básicas + avanzadas) — cacheadas 6 h para no saturar la NBA API
+    team_stats_df = _get_team_stats_cached()
 
-    # Enriquecer con forma reciente (últimos 5 partidos por equipo)
+    # Enriquecer con forma reciente — con timeout para evitar que la NBA API cuelgue el request
     try:
-        games_enriched = enrich_with_form(games_df, season=NBA_SEASON, n=5)
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as _TimeoutError
+        with ThreadPoolExecutor(max_workers=1) as _pool:
+            _fut = _pool.submit(enrich_with_form, games_df, NBA_SEASON, 5)
+            try:
+                games_enriched = _fut.result(timeout=20)
+            except _TimeoutError:
+                logger.warning("enrich_with_form tardó >20s — predicciones sin forma reciente")
+                games_enriched = games_df
     except Exception as exc:
         logger.warning("enrich_with_form falló: %s — predicciones sin forma reciente", exc)
         games_enriched = games_df
@@ -187,8 +240,8 @@ def _run_pipeline(date_str: str) -> dict:
         except Exception as exc:
             logger.warning("adjust_predictions falló: %s — predicciones sin ajuste de lesiones", exc)
 
-    # 4. Cuotas (pasa games_df para asignación multi-fecha de game_ids)
-    odds_df = get_odds(games_df)
+    # 4. Cuotas cacheadas por fecha para evitar scraping repetido cada request
+    odds_df = _get_odds_cached(games_df, date_str)
 
     # 5. Value bets
     value_bets_df = pd.DataFrame()

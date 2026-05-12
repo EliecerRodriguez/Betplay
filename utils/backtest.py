@@ -43,21 +43,23 @@ logger = get_logger(__name__)
 @dataclass
 class BacktestResult:
     """Resultados completos de una simulación de backtesting."""
-    n_games:         int
-    n_bets:          int            # partidos donde Kelly > umbral mínimo
-    hit_rate:        float          # predicciones correctas / total predicciones
-    bet_hit_rate:    float          # hits en partidos con apuesta Kelly
-    roi:             float          # retorno neto / apuestas totales
-    profit_units:    float          # unidades de ganancia (bankroll=1)
-    max_drawdown:    float          # peor caída de bankroll pico a valle
-    sharpe:          float          # media retorno / std retorno
-    avg_kelly_frac:  float          # fracción Kelly promedio
-    log_loss:        float          # log loss calibración
-    brier_score:     float          # brier score calibración
-    bets_df:         pd.DataFrame   # detalle por apuesta
-    bucket_df:       pd.DataFrame   # calibración por bucket de probabilidad
+    n_games:          int
+    n_bets:           int            # partidos donde Kelly > umbral mínimo
+    hit_rate:         float          # predicciones correctas / total predicciones
+    bet_hit_rate:     float          # hits en partidos con apuesta Kelly
+    roi:              float          # retorno neto / apuestas totales
+    profit_units:     float          # unidades de ganancia (bankroll=1)
+    max_drawdown:     float          # peor caída de bankroll pico a valle
+    sharpe:           float          # media retorno / std retorno
+    avg_kelly_frac:   float          # fracción Kelly promedio
+    avg_opening_edge: float          # CLV proxy: mean(model_prob - 1/odds) para apuestas realizadas
+    log_loss:         float          # log loss calibración
+    brier_score:      float          # brier score calibración
+    bets_df:          pd.DataFrame   # detalle por apuesta
+    bucket_df:        pd.DataFrame   # calibración por bucket de probabilidad
 
     def summary(self) -> str:
+        edge_sign = "+" if self.avg_opening_edge >= 0 else ""
         lines = [
             "=" * 55,
             f"  BACKTEST RESULTADOS",
@@ -71,6 +73,7 @@ class BacktestResult:
             f"  Max Drawdown        : {self.max_drawdown:.2%}",
             f"  Sharpe Ratio        : {self.sharpe:.3f}",
             f"  Avg Kelly Fraction  : {self.avg_kelly_frac:.2%}",
+            f"  CLV (Opening Edge)  : {edge_sign}{self.avg_opening_edge:.2%}",
             f"  Log Loss            : {self.log_loss:.4f}",
             f"  Brier Score         : {self.brier_score:.4f}",
             "=" * 55,
@@ -171,16 +174,17 @@ def run_backtest(
             max_dd = dd
 
         records.append({
-            "side":       side,
-            "kelly_frac": frac,
-            "bet_size":   bet_size,
-            "pnl":        pnl,
-            "bankroll":   bankroll,
-            "bet":        True,
-            "bet_won":    bet_won,
-            "home_prob":  home_prob,
-            "actual_win": actual_win,
-        })
+                "side":       side,
+                "kelly_frac": frac,
+                "bet_size":   bet_size,
+                "pnl":        pnl,
+                "bankroll":   bankroll,
+                "bet":        True,
+                "bet_won":    bet_won,
+                "home_prob":  home_prob,
+                "actual_win": actual_win,
+                "opening_edge": prob_used - (1.0 / flat_odds),   # CLV proxy
+            })
 
     bets_df  = pd.DataFrame(records)
     n_bets   = int(bets_df["bet"].sum())
@@ -209,6 +213,13 @@ def run_backtest(
 
     avg_kelly = bets_only["kelly_frac"].mean() if not bets_only.empty else 0.0
 
+    # ── CLV (Opening Edge) ────────────────────────────────────────────────────
+    # Proxy: diferencia entre prob. del modelo y la prob. implícita de la cuota
+    # Positivo = el modelo encuentra consistentemente valor vs las cuotas del mercado
+    avg_opening_edge = (bets_only["opening_edge"].mean()
+                        if not bets_only.empty and "opening_edge" in bets_only.columns
+                        else 0.0)
+
     # ── Calibración ───────────────────────────────────────────────────────────
     y_pred = df["home_win_prob"].values
     y_true = df["home_win"].values.astype(float)
@@ -228,6 +239,7 @@ def run_backtest(
         max_drawdown=max_dd,
         sharpe=float(sharpe),
         avg_kelly_frac=float(avg_kelly),
+        avg_opening_edge=float(avg_opening_edge),
         log_loss=log_loss,
         brier_score=brier,
         bets_df=bets_df,

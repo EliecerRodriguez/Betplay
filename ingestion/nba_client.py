@@ -232,7 +232,7 @@ def get_team_advanced_stats(season: Optional[str] = None) -> pd.DataFrame:
     try:
         stats = LeagueDashTeamStats(
             season=season,
-            measure_type_nullable="Advanced",
+            measure_type_detailed_defense="Advanced",
             per_mode_detailed="PerGame",
             timeout=NBA_API_TIMEOUT,
         )

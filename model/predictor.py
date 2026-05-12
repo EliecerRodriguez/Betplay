@@ -313,6 +313,52 @@ def train(
     except Exception as exc:
         logger.debug("feature importance falló: %s", exc)
 
+    # ── SHAP values (TreeExplainer para XGBoost) ──────────────────────────────
+    try:
+        import shap  # type: ignore
+        # Extraer el clasificador base del pipeline (paso final)
+        clf = pipeline.named_steps.get("clf") or pipeline.steps[-1][1]
+        # Si es CalibratedClassifierCV, acceder al estimador base
+        if hasattr(clf, "estimator"):
+            base_clf = clf.estimator
+        elif hasattr(clf, "calibrated_classifiers_"):
+            # Usar primer calibrador
+            base_clf = clf.calibrated_classifiers_[0].estimator
+        else:
+            base_clf = clf
+
+        # Transformar X_test a través de los pasos previos al clf
+        steps_before_clf = pipeline.steps[:-1]
+        X_test_transformed = X_test.copy()
+        for _, step in steps_before_clf:
+            if hasattr(step, "transform"):
+                X_test_transformed = step.transform(X_test_transformed)
+
+        explainer = shap.TreeExplainer(base_clf)
+        shap_values = explainer.shap_values(X_test_transformed)
+
+        # Para clasificación binaria, shap_values puede ser lista [neg, pos]
+        if isinstance(shap_values, list):
+            sv = shap_values[1]
+        else:
+            sv = shap_values
+
+        shap_mean = np.abs(sv).mean(axis=0)
+        shap_df = (
+            pd.DataFrame({"feature": list(X.columns), "shap_importance": shap_mean})
+            .sort_values("shap_importance", ascending=False)
+            .reset_index(drop=True)
+        )
+        top10_shap = shap_df.head(10)
+        lines_shap = ["\n── Top 10 Features (SHAP Mean |value|) ──"]
+        for _, row in top10_shap.iterrows():
+            bar = "█" * max(1, int(row["shap_importance"] * 400))
+            lines_shap.append(f"  {row['feature']:<30} {row['shap_importance']:.4f}  {bar}")
+        logger.info("\n".join(lines_shap))
+        metrics["shap_importance"] = shap_df.to_dict(orient="records")
+    except Exception as exc:
+        logger.debug("SHAP falló: %s", exc)
+
     # ── Guardar modelo ────────────────────────────────────────────────────────
     os.makedirs(MODEL_DIR, exist_ok=True)
     path = _model_path(version)
