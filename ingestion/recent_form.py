@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import time
 from datetime import date, datetime, timedelta
-from functools import lru_cache
 from typing import Dict, Optional
 
 import pandas as pd
@@ -24,11 +23,16 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 _DELAY = 0.6   # segundos entre llamadas NBA API
+_GAME_LOG_CACHE: dict = {}   # key: (team_id, season) -> {"df": DataFrame, "ts": float}
+_GAME_LOG_TTL   = 6 * 3600  # 6 horas — suficiente para un día de partidos
 
 
-@lru_cache(maxsize=64)
 def _get_team_game_log(team_id: int, season: str) -> pd.DataFrame:
-    """Descarga el historial de partidos de un equipo en la temporada. Cacheado en memoria."""
+    """Descarga el historial de partidos de un equipo en la temporada. Cacheado 6h."""
+    key = (team_id, season)
+    cached = _GAME_LOG_CACHE.get(key)
+    if cached and (time.time() - cached["ts"]) < _GAME_LOG_TTL:
+        return cached["df"]
     try:
         from nba_api.stats.endpoints import teamgamelog
         time.sleep(_DELAY)
@@ -38,7 +42,11 @@ def _get_team_game_log(team_id: int, season: str) -> pd.DataFrame:
             return pd.DataFrame()
         df = df.rename(columns=str.upper)
         # Columnas: Game_ID, GAME_DATE, MATCHUP, WL, PTS, ...
-        df["GAME_DATE"] = pd.to_datetime(df["Game_Date"] if "Game_Date" in df.columns else df["GAME_DATE"], errors="coerce").dt.date
+        date_col = "Game_Date" if "Game_Date" in df.columns else "GAME_DATE"
+        df["GAME_DATE"] = pd.to_datetime(df[date_col], format="%b %d, %Y", errors="coerce")
+        if df["GAME_DATE"].isna().all():
+            df["GAME_DATE"] = pd.to_datetime(df[date_col], errors="coerce")
+        df["GAME_DATE"] = df["GAME_DATE"].dt.date
         df["GAME_ID"]   = df["Game_ID"].astype(str) if "Game_ID" in df.columns else df["GAME_ID"].astype(str)
         df["PTS_SCORED"] = pd.to_numeric(df.get("PTS", pd.Series(dtype=float)), errors="coerce")
         # Puntos concedidos: PTS_OPP si existe, sino calculamos desde PLUS_MINUS
@@ -51,7 +59,9 @@ def _get_team_game_log(team_id: int, season: str) -> pd.DataFrame:
         df["WON"] = (df["WL"] == "W").astype(int) if "WL" in df.columns else float("nan")
         # Ordenar cronológicamente
         df = df.sort_values("GAME_DATE").reset_index(drop=True)
-        return df[["GAME_ID", "GAME_DATE", "WON", "PTS_SCORED", "PTS_ALLOWED"]]
+        result = df[["GAME_ID", "GAME_DATE", "WON", "PTS_SCORED", "PTS_ALLOWED"]]
+        _GAME_LOG_CACHE[key] = {"df": result, "ts": time.time()}
+        return result
     except Exception as exc:
         logger.warning("_get_team_game_log(%d, %s): %s", team_id, season, exc)
         return pd.DataFrame()

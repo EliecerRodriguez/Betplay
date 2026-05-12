@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import date as _date_cls
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -54,10 +54,12 @@ _TEAMS_MAP: dict[int, str] = {t["id"]: t["full_name"] for t in nba_teams_static.
 async def _startup_preload() -> None:
     """Pre-carga stats de equipo en un hilo para que el primer request sea rápido."""
     import asyncio
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     loop.run_in_executor(None, _get_team_stats_cached)
     logger.info("Startup: pre-carga de team stats lanzada en background")
-_CACHE: dict[str, dict] = {}
+
+_CACHE: dict[str, dict] = {}   # key: date_str -> {"data": ..., "ts": float}
+_CACHE_TTL = 10 * 60           # 10 minutos — refresca cuotas y predicciones automáticamente
 
 # Caché de stats de equipo (se renueva cada 6 h para no saturar la NBA API en cada request)
 _TEAM_STATS_CACHE: dict = {"df": None, "ts": 0.0}
@@ -66,6 +68,77 @@ _TEAM_STATS_TTL = 6 * 3600   # segundos
 # Caché de cuotas por fecha (30 min) para evitar scraping repetido
 _ODDS_CACHE: dict[str, dict] = {}   # key: date_str -> {"df": DataFrame, "ts": float}
 _ODDS_TTL = 30 * 60   # 30 minutos
+
+# ── Persistencia (Supabase / PostgreSQL) ─────────────────────────────────────
+
+_repo = None   # singleton lazy — se inicializa en el primer request
+
+def _get_repo():
+    """Devuelve el repositorio de BD o None si no está configurado."""
+    global _repo
+    if _repo is not None:
+        return _repo
+    from config.settings import DATABASE_URL
+    if not DATABASE_URL or "localhost" in DATABASE_URL:
+        return None
+    try:
+        from database.repository import DatabaseRepository
+        _repo = DatabaseRepository(DATABASE_URL)
+        logger.info("Repositorio BD conectado a Supabase")
+    except Exception as exc:
+        logger.warning("BD no disponible (%s) — la app funciona sin persistencia", exc)
+        _repo = None
+    return _repo
+
+
+def _persist_to_db(
+    games_df: "pd.DataFrame",
+    predictions_df: "pd.DataFrame",
+    odds_df: "pd.DataFrame",
+    value_bets_df: "pd.DataFrame",
+    date_str: str,
+) -> None:
+    """Persiste los DataFrames del pipeline en Supabase. Se ejecuta en hilo separado."""
+    repo = _get_repo()
+    if repo is None:
+        return
+    from datetime import date as _d
+    today = _d.today()
+    try:
+        # Games
+        if not games_df.empty:
+            gdf = games_df.copy()
+            gdf["fetch_date"] = today
+            gdf["season"] = NBA_SEASON
+            repo.upsert_games(gdf)
+        # Predictions — añadir columnas de contexto que necesita la tabla
+        if not predictions_df.empty:
+            pdf = predictions_df.copy()
+            pdf["fetch_date"] = today
+            if "game_date" not in pdf.columns:
+                pdf["game_date"] = today
+            # Unir home/visitor team_id desde games_df si faltan
+            for col in ("home_team_id", "visitor_team_id"):
+                if col not in pdf.columns and not games_df.empty and col in games_df.columns:
+                    pdf = pdf.merge(
+                        games_df[["game_id", col]], on="game_id", how="left"
+                    )
+            repo.upsert_predictions(pdf)
+        # Odds
+        if not odds_df.empty:
+            odf = odds_df.copy()
+            odf["fetch_date"] = today
+            repo.upsert_odds(odf)
+        # Value bets
+        if not value_bets_df.empty:
+            vdf = value_bets_df.copy()
+            vdf["fetch_date"] = today
+            if "game_date" not in vdf.columns:
+                vdf["game_date"] = today
+            repo.upsert_value_bets(vdf)
+        logger.info("Persistencia Supabase completada para %s", date_str)
+    except Exception as exc:
+        logger.warning("Error persitiendo en BD para %s: %s", date_str, exc)
 
 def _get_team_stats_cached() -> "pd.DataFrame":
     """Devuelve stats de equipo cacheadas; recarga si TTL expiró o primera vez."""
@@ -124,8 +197,9 @@ def _handicap_label(fav_prob: float, home_is_fav: bool) -> str:
 
 def _utc_to_et(utc_str: str) -> str:
     try:
+        from zoneinfo import ZoneInfo
         dt = datetime.fromisoformat(utc_str.replace("Z", "+00:00"))
-        dt_et = dt - timedelta(hours=5)          # UTC → ET (sin DST para playoffs)
+        dt_et = dt.astimezone(ZoneInfo("America/New_York"))
         return dt_et.strftime("%I:%M %p ET").lstrip("0")
     except Exception:
         return "TBD"
@@ -250,6 +324,15 @@ def _run_pipeline(date_str: str) -> dict:
             value_bets_df = detect_value_bets(predictions_df, odds_df)
         except Exception as exc:
             logger.warning("detect_value_bets falló: %s", exc)
+
+    # 6. Persistir en Supabase en background (no bloquea la respuesta)
+    try:
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        _TPE(max_workers=1).submit(
+            _persist_to_db, games_df, predictions_df, odds_df, value_bets_df, date_str
+        )
+    except Exception as exc:
+        logger.debug("No se pudo lanzar hilo de persistencia: %s", exc)
 
     return _build_response(date_str, games_df, predictions_df, odds_df, value_bets_df)
 
@@ -397,14 +480,18 @@ def root():
 @app.get("/api/analysis")
 def get_analysis(date: Optional[str] = Query(default=None)):
     """Ejecuta el pipeline completo y devuelve el análisis del día."""
+    import time
     date_str = date or _date_cls.today().isoformat()
-    if date_str not in _CACHE:
-        try:
-            _CACHE[date_str] = _run_pipeline(date_str)
-        except Exception as exc:
-            logger.error("Pipeline error [%s]: %s", date_str, exc, exc_info=True)
-            raise HTTPException(status_code=500, detail=str(exc))
-    return _CACHE[date_str]
+    cached = _CACHE.get(date_str)
+    if cached and (time.time() - cached["ts"]) < _CACHE_TTL:
+        return cached["data"]
+    try:
+        data = _run_pipeline(date_str)
+        _CACHE[date_str] = {"data": data, "ts": time.time()}
+    except Exception as exc:
+        logger.error("Pipeline error [%s]: %s", date_str, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+    return _CACHE[date_str]["data"]
 
 
 @app.delete("/api/cache")
@@ -414,6 +501,7 @@ def clear_cache(date: Optional[str] = Query(default=None)):
         _CACHE.pop(date, None)
     else:
         _CACHE.clear()
+        _ODDS_CACHE.clear()
     return {"status": "ok", "cleared": date or "all"}
 
 

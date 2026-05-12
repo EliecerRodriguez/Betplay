@@ -30,7 +30,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import accuracy_score, brier_score_loss, classification_report, log_loss, roc_auc_score
-from sklearn.model_selection import TimeSeriesSplit, cross_val_score, train_test_split
+from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -55,8 +55,34 @@ logger = get_logger(__name__)
 # ── Configuración ─────────────────────────────────────────────────────────────
 
 MODEL_DIR     = os.getenv("MODEL_DIR", "models")
-MODEL_VERSION = os.getenv("MODEL_VERSION", "v1")
 MODEL_TYPE    = os.getenv("MODEL_TYPE", "xgboost")   # 'xgboost' | 'random_forest' | 'logistic' | 'ensemble'
+
+
+def _latest_model_version() -> str:
+    """Auto-detecta la versión más reciente disponible en MODEL_DIR."""
+    env_version = os.getenv("MODEL_VERSION", "")
+    if env_version:
+        return env_version
+    try:
+        import glob
+        pattern = os.path.join(MODEL_DIR, "nba_model_v*.joblib")
+        files = glob.glob(pattern)
+        if files:
+            # Extraer número de versión y devolver el mayor
+            versions = []
+            for f in files:
+                name = os.path.basename(f)
+                num = name.replace("nba_model_v", "").replace(".joblib", "")
+                if num.isdigit():
+                    versions.append(int(num))
+            if versions:
+                return f"v{max(versions)}"
+    except Exception:
+        pass
+    return "v5"   # fallback explícito al último modelo conocido
+
+
+MODEL_VERSION = _latest_model_version()
 
 _MODEL_PATH_TEMPLATE = os.path.join(MODEL_DIR, "nba_model_{version}.joblib")
 

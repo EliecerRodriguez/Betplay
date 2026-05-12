@@ -8,7 +8,6 @@ Features generadas por partido:
   - Promedios de puntos (home/away) de la temporada
   - Win % (home/away)
   - Factor local (home_advantage = 1)
-  - Diferencial ofensivo: pts_diff = home_pts - away_pts
   - Diferencial de victorias: wpct_diff = home_wpct - away_wpct
   - Indicadores de rendimiento defensivo (fg_pct, tov)
 
@@ -178,10 +177,6 @@ def build_features(
 
     # ── Features derivadas ────────────────────────────────────────────────────
     feature_df = games.copy()
-
-    # Diferencial de puntos promedio (ofensiva)
-    if "home_pts" in feature_df.columns and "visitor_pts" in feature_df.columns:
-        feature_df["pts_diff"] = feature_df["home_pts"] - feature_df["visitor_pts"]
 
     # Diferencial de win % 
     if "home_w_pct" in feature_df.columns and "visitor_w_pct" in feature_df.columns:

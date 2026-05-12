@@ -278,32 +278,3 @@ def get_combined_team_stats(season: Optional[str] = None) -> pd.DataFrame:
                 len(merged), len(merged.columns))
     return merged
 
-
-# ── Resumen de ingesta ────────────────────────────────────────────────────────
-
-def ingest_all(game_date: Optional[str] = None, season: Optional[str] = None) -> dict:
-    """
-    Ejecuta la ingesta completa de NBA para una fecha y temporada.
-
-    Args:
-        game_date: Fecha a consultar (por defecto hoy).
-        season:    Temporada (por defecto NBA_SEASON del config).
-
-    Returns:
-        Diccionario con DataFrames bajo las claves:
-          'games', 'line_scores', 'teams', 'team_stats'
-    """
-    logger.info("=== Iniciando ingesta NBA ===")
-
-    result = {
-        "games":       get_daily_games(game_date),
-        "line_scores": get_line_scores(game_date),
-        "teams":       get_teams(),
-        "team_stats":  get_team_stats(season),
-    }
-
-    for key, df in result.items():
-        logger.info("%-12s → %d filas", key, len(df))
-
-    logger.info("=== Ingesta NBA completada ===")
-    return result
