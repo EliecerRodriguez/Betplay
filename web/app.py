@@ -1,0 +1,368 @@
+"""
+Dashboard web para NBA Betplay Analytics.
+
+Iniciar:
+    uvicorn web.app:app --reload --port 8000
+
+Acceder en:  http://localhost:8000
+"""
+from __future__ import annotations
+
+import os
+import sys
+from datetime import date as _date_cls
+from datetime import datetime, timedelta
+from typing import Optional
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import pandas as pd
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from nba_api.stats.static import teams as nba_teams_static
+
+from config.settings import NBA_SEASON
+from ingestion.elo import apply_elos_to_games, load_current_elos
+from ingestion.injuries_client import adjust_predictions, get_injuries_summary_for_game
+from ingestion.nba_client import get_combined_team_stats, get_daily_games, get_team_stats
+from ingestion.odds_client import get_odds
+from ingestion.recent_form import enrich_with_form
+from model.predictor import predict
+from model.value_detector import detect_value_bets
+from processing.features import build_features
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+# ── App ───────────────────────────────────────────────────────────────────────
+app = FastAPI(title="NBA Betplay Analytics", version="1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["*"],
+)
+
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+_TEAMS_MAP: dict[int, str] = {t["id"]: t["full_name"] for t in nba_teams_static.get_teams()}
+_CACHE: dict[str, dict] = {}
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _kelly(prob: float, decimal_odds: float) -> float:
+    """Full Kelly fraction (0–1). Retorna 0 si no hay valor."""
+    b = decimal_odds - 1.0
+    if b <= 0 or prob <= 0 or prob >= 1:
+        return 0.0
+    return max(0.0, (b * prob - (1.0 - prob)) / b)
+
+
+def _handicap_label(fav_prob: float, home_is_fav: bool) -> str:
+    """Handicap referencial aproximado desde probabilidad."""
+    if fav_prob < 0.53:
+        return "Pick'em"
+    thresholds = [(0.88, 15), (0.83, 12.5), (0.78, 10), (0.73, 7.5),
+                  (0.68, 5.5), (0.62, 3.5), (0.55, 1.5), (0.53, 0.5)]
+    spread = next((s for t, s in thresholds if fav_prob >= t), 0.5)
+    sign = "-" if home_is_fav else "+"
+    return f"{sign}{spread}"
+
+
+def _utc_to_et(utc_str: str) -> str:
+    try:
+        dt = datetime.fromisoformat(utc_str.replace("Z", "+00:00"))
+        dt_et = dt - timedelta(hours=5)          # UTC → ET (sin DST para playoffs)
+        return dt_et.strftime("%I:%M %p ET").lstrip("0")
+    except Exception:
+        return "TBD"
+
+
+def _find_arbitrage(odds_list: list, home_name: str, away_name: str) -> dict | None:
+    """Detecta arbitraje: mejor cuota local en cualquier casa + mejor visitante en cualquier otra."""
+    if not odds_list:
+        return None
+    valid = [o for o in odds_list if o["home_odds"] > 1.01 and o["away_odds"] > 1.01]
+    if not valid:
+        return None
+    best_h = max(valid, key=lambda x: x["home_odds"])
+    best_a = max(valid, key=lambda x: x["away_odds"])
+    bh, ba = best_h["home_odds"], best_a["away_odds"]
+    implied = 1 / bh + 1 / ba
+    if implied >= 1.0:
+        return None
+    profit_pct    = round((1 / implied - 1) * 100, 2)
+    stake_home_pct = round((1 / bh) / implied * 100, 1)
+    stake_away_pct = round((1 / ba) / implied * 100, 1)
+    return {
+        "profit_pct":  profit_pct,
+        "home_side": {"team": home_name, "bookmaker": best_h["bookmaker"], "odds": bh, "stake_pct": stake_home_pct},
+        "away_side": {"team": away_name, "bookmaker": best_a["bookmaker"], "odds": ba, "stake_pct": stake_away_pct},
+    }
+
+
+def _best_action(game: dict) -> dict:
+    """Devuelve la acción más clara y directa para el partido."""
+    arb = game.get("arb")
+    if arb:
+        return {
+            "type":   "arb",
+            "label":  f"ARBITRAJE DISPONIBLE · +{arb['profit_pct']}% GARANTIZADO",
+            "line1":  f"▶ Apuesta {arb['home_side']['stake_pct']}% del bankroll a {arb['home_side']['team']} en {arb['home_side']['bookmaker']} (cuota {arb['home_side']['odds']})",
+            "line2":  f"▶ Apuesta {arb['away_side']['stake_pct']}% del bankroll a {arb['away_side']['team']} en {arb['away_side']['bookmaker']} (cuota {arb['away_side']['odds']})",
+            "note":   "Cubriendo ambos lados obtienes ganancia sin importar el resultado",
+        }
+    top_vb = next((v for v in game.get("value_bets", []) if v["is_value_bet"]), None)
+    if top_vb:
+        return {
+            "type":  "value",
+            "label": f"APUESTA A: {top_vb['team']}",
+            "line1": f"▶ Casa: {top_vb['bookmaker']} · Cuota: {top_vb['odds']} · EV esperado: +{top_vb['value_pct']:.1f}%",
+            "line2": f"▶ Modelo: {top_vb['model_prob_pct']}% prob. real vs {100/top_vb['odds']:.1f}% implícita en cuota",
+            "note":  f"Confianza {game['confidence']} · Kelly ½ = {top_vb['kelly_pct']/2:.2f}% del bankroll",
+        }
+    side = game["recommended_side"]
+    bm   = game["best_odds"][side]
+    return {
+        "type":  "model",
+        "label": f"APUESTA A: {game['recommended_bet']}",
+        "line1": f"▶ Mejor cuota: {bm['odds']} en {bm['bookmaker']}",
+        "line2": f"▶ Probabilidad modelo: {game['home_win_prob' if side=='home' else 'away_win_prob']}% · Handicap ref.: {game['handicap']}",
+        "note":  f"Confianza {game['confidence']} (sin valor estadístico detectado — apostar con cautela)",
+    }
+
+
+# ── Pipeline ──────────────────────────────────────────────────────────────────
+
+def _run_pipeline(date_str: str) -> dict:
+    # 1. Partidos
+    games_df = get_daily_games(date_str)
+    if games_df.empty:
+        return {
+            "date": date_str, "games": [], "error": "No hay partidos NBA para esta fecha.",
+            "summary": {"total_games": 0, "value_bets_count": 0, "best_opportunity": None},
+        }
+
+    # 2. Team stats (básicas + avanzadas ORTG/DRTG/Pace/TS%)
+    try:
+        team_stats_df = get_combined_team_stats(NBA_SEASON)
+    except Exception as exc:
+        logger.warning("get_combined_team_stats falló (%s) — usando stats básicas", exc)
+        team_stats_df = get_team_stats(NBA_SEASON)
+
+    # Enriquecer con forma reciente (últimos 5 partidos por equipo)
+    try:
+        games_enriched = enrich_with_form(games_df, season=NBA_SEASON, n=5)
+    except Exception as exc:
+        logger.warning("enrich_with_form falló: %s — predicciones sin forma reciente", exc)
+        games_enriched = games_df
+
+    # Enriquecer con Elo (carga ratings actuales guardados tras el último entrenamiento)
+    try:
+        current_elos = load_current_elos("models/current_elos.json")
+        if current_elos:
+            games_enriched = apply_elos_to_games(games_enriched, current_elos)
+            logger.debug("Elo aplicado: %d equipos | elo_diff range [%.0f, %.0f]",
+                         len(current_elos),
+                         games_enriched["elo_diff"].min(),
+                         games_enriched["elo_diff"].max())
+    except Exception as exc:
+        logger.debug("Elo no disponible: %s", exc)
+
+    feature_df = (
+        build_features(games_enriched, team_stats_df)
+        if not team_stats_df.empty else pd.DataFrame()
+    )
+
+    # 3. Predicciones
+    predictions_df = predict(feature_df) if not feature_df.empty else pd.DataFrame()
+
+    # 3b. Ajustar probabilidades según lesiones en tiempo real
+    if not predictions_df.empty:
+        try:
+            predictions_df = adjust_predictions(predictions_df, games_df, season=NBA_SEASON)
+        except Exception as exc:
+            logger.warning("adjust_predictions falló: %s — predicciones sin ajuste de lesiones", exc)
+
+    # 4. Cuotas (pasa games_df para asignación multi-fecha de game_ids)
+    odds_df = get_odds(games_df)
+
+    # 5. Value bets
+    value_bets_df = pd.DataFrame()
+    if not predictions_df.empty and not odds_df.empty:
+        try:
+            value_bets_df = detect_value_bets(predictions_df, odds_df)
+        except Exception as exc:
+            logger.warning("detect_value_bets falló: %s", exc)
+
+    return _build_response(date_str, games_df, predictions_df, odds_df, value_bets_df)
+
+
+def _build_response(date_str, games_df, predictions_df, odds_df, value_bets_df) -> dict:
+    games = []
+
+    for _, game in games_df.iterrows():
+        game_id   = str(game.get("game_id", ""))
+        home_id   = int(game.get("home_team_id", 0) or 0)
+        away_id   = int(game.get("visitor_team_id", 0) or 0)
+        home_name = _TEAMS_MAP.get(home_id, str(home_id))
+        away_name = _TEAMS_MAP.get(away_id, str(away_id))
+        game_time = _utc_to_et(str(game.get("game_time_utc", "") or ""))
+
+        # Probabilidades
+        home_prob = away_prob = 0.50
+        if not predictions_df.empty and "game_id" in predictions_df.columns:
+            p = predictions_df[predictions_df["game_id"] == game_id]
+            if not p.empty:
+                home_prob = float(p["home_win_prob"].iloc[0] or 0.5)
+                away_prob = float(p["away_win_prob"].iloc[0] or 0.5)
+
+        max_prob     = max(home_prob, away_prob)
+        home_is_fav  = home_prob >= away_prob
+        confidence   = "Alta" if max_prob >= 0.70 else "Media" if max_prob >= 0.60 else "Baja"
+        recommended  = home_name if home_is_fav else away_name
+        rec_side     = "home" if home_is_fav else "away"
+        handicap     = _handicap_label(max_prob, home_is_fav)
+
+        # Cuotas
+        game_odds_df = (
+            odds_df[odds_df["game_id"] == game_id]
+            if not odds_df.empty and "game_id" in odds_df.columns
+            else pd.DataFrame()
+        )
+        odds_list  = []
+        best_home  = {"bookmaker": "—", "odds": 0.0}
+        best_away  = {"bookmaker": "—", "odds": 0.0}
+
+        for _, odd in game_odds_df.iterrows():
+            ho = round(float(odd.get("home_odds", 0) or 0), 2)
+            ao = round(float(odd.get("away_odds", 0) or 0), 2)
+            bm = str(odd.get("bookmaker", ""))
+            odds_list.append({"bookmaker": bm, "home_odds": ho, "away_odds": ao})
+            if ho > best_home["odds"]:
+                best_home = {"bookmaker": bm, "odds": ho}
+            if ao > best_away["odds"]:
+                best_away = {"bookmaker": bm, "odds": ao}
+
+        # Value bets
+        vb_list = []
+        if not value_bets_df.empty and "game_id" in value_bets_df.columns:
+            for _, vb in value_bets_df[value_bets_df["game_id"] == game_id].iterrows():
+                is_vb    = bool(vb.get("is_value_bet", False))
+                model_p  = float(vb.get("model_prob", 0) or 0)
+                odd_v    = float(vb.get("odds", 0) or 0)
+                val      = float(vb.get("value", 0) or 0)
+                kel      = _kelly(model_p, odd_v)
+                team_n   = str(vb.get("team_name", "") or "")
+                side_str = str(vb.get("side", ""))
+                if not team_n or team_n.replace(".", "").isdigit():
+                    team_n = home_name if side_str == "home" else away_name
+                vb_list.append({
+                    "team":           team_n,
+                    "side":           side_str,
+                    "bookmaker":      str(vb.get("bookmaker", "")),
+                    "odds":           round(odd_v, 2),
+                    "model_prob_pct": round(model_p * 100, 1),
+                    "value_pct":      round(val * 100, 2),
+                    "kelly_pct":      round(kel * 100, 3),
+                    "is_value_bet":   is_vb,
+                })
+
+        vb_list.sort(key=lambda x: x["value_pct"], reverse=True)
+
+        arb = _find_arbitrage(odds_list, home_name, away_name)
+
+        # Lesiones en tiempo real
+        injury_info = {"home": [], "visitor": [], "home_pts_lost": 0, "visitor_pts_lost": 0, "net_impact": 0}
+        try:
+            injury_info = get_injuries_summary_for_game(home_id, away_id, season=NBA_SEASON)
+        except Exception as exc:
+            logger.debug("injuries para %s: %s", game_id, exc)
+
+        # Ajuste de probabilidad aplicado (desde predictions_df si está disponible)
+        inj_adjustment = 0.0
+        if not predictions_df.empty and "injury_adjustment" in predictions_df.columns:
+            p = predictions_df[predictions_df["game_id"] == game_id]
+            if not p.empty:
+                inj_adjustment = round(float(p["injury_adjustment"].iloc[0] or 0) * 100, 1)
+
+        game_obj = {
+            "game_id":         game_id,
+            "home_team":       home_name,
+            "away_team":       away_name,
+            "game_time":       game_time,
+            "home_win_prob":   round(home_prob * 100, 1),
+            "away_win_prob":   round(away_prob * 100, 1),
+            "recommended_bet": recommended,
+            "recommended_side": rec_side,
+            "confidence":      confidence,
+            "handicap":        handicap,
+            "odds":            odds_list,
+            "best_odds":       {"home": best_home, "away": best_away},
+            "value_bets":      vb_list,
+            "has_value":       any(v["is_value_bet"] for v in vb_list),
+            "arb":             arb,
+            "injuries":        injury_info,
+            "injury_adjustment_pct": inj_adjustment,
+        }
+        game_obj["action"] = _best_action(game_obj)
+        games.append(game_obj)
+
+    # Ordenar: value bets primero, luego por confianza
+    conf_order = {"Alta": 0, "Media": 1, "Baja": 2}
+    games.sort(key=lambda g: (not g["has_value"], conf_order.get(g["confidence"], 3)))
+
+    all_vb  = [v for g in games for v in g["value_bets"] if v["is_value_bet"]]
+    best_vb = max(all_vb, key=lambda x: x["value_pct"], default=None)
+    arb_games = [g for g in games if g["arb"]]
+
+    return {
+        "date": date_str,
+        "games": games,
+        "summary": {
+            "total_games":      len(games),
+            "value_bets_count": len(all_vb),
+            "arb_count":        len(arb_games),
+            "best_opportunity": (
+                f"{best_vb['team']} @ {best_vb['bookmaker']} (+{best_vb['value_pct']:.1f}% EV)"
+                if best_vb else None
+            ),
+        },
+    }
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.get("/", include_in_schema=False)
+def root():
+    return FileResponse(os.path.join(_STATIC_DIR, "index.html"))
+
+
+@app.get("/api/analysis")
+def get_analysis(date: Optional[str] = Query(default=None)):
+    """Ejecuta el pipeline completo y devuelve el análisis del día."""
+    date_str = date or _date_cls.today().isoformat()
+    if date_str not in _CACHE:
+        try:
+            _CACHE[date_str] = _run_pipeline(date_str)
+        except Exception as exc:
+            logger.error("Pipeline error [%s]: %s", date_str, exc, exc_info=True)
+            raise HTTPException(status_code=500, detail=str(exc))
+    return _CACHE[date_str]
+
+
+@app.delete("/api/cache")
+def clear_cache(date: Optional[str] = Query(default=None)):
+    """Limpia la caché para forzar re-ejecución del pipeline."""
+    if date:
+        _CACHE.pop(date, None)
+    else:
+        _CACHE.clear()
+    return {"status": "ok", "cleared": date or "all"}
+
+
+# Archivos estáticos (al final para no interceptar rutas de la API)
+app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")

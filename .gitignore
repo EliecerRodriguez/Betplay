@@ -1,0 +1,17 @@
+.env
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+logs/
+output/
+data/cache/
+*.csv
+*.pkl
+*.joblib
+.pytest_cache/
+.coverage

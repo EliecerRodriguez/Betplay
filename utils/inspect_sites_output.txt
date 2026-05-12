@@ -1,0 +1,169 @@
+
+=======================================================
+CASA: Betplay  |  https://betplay.com.co/apuestas
+  URL final  : https://betplay.com.co/apuestas#home
+  Titulo     : Apuestas deportivas de futbol - Gana gracias a tu pasión
+  API calls relevantes (74):
+    [POST] https://realtime-960.optimove.net/reportEvent
+    [POST] https://load.b.byads.co/data?v=2&event_name=page_view&richsstsse
+    [GET] https://ctag.containermedia.net/api/event?type=Page%20View&userid=6e3e85fa-5ec2-4d04-a5bd-e08f114bc91b&host=betplay.com.
+    [GET] https://apicms.betplay.com.co/api/v1/elements/get-elements
+    [GET] https://apicms.betplay.com.co/api/v1/assets/get-all
+    [GET] https://apicms.betplay.com.co/api/v1/appearance/home-images
+    [POST] https://events-us-east-1.kumulos.com/v1/app-installs/ac7a6ab5-641a-4075-b838-f3d01c8c5622/events
+    [GET] https://apicms.betplay.com.co/jackpod.json
+    [GET] https://settings-api.kambicdn.com/betplay__microFrontends.json
+    [POST] https://apicms.betplay.com.co/cdn-cgi/challenge-platform/h/g/jsd/oneshot/fe6331af5207/0.09051575470781259:1778033312:c-8
+    [GET] https://settings-api.kambicdn.com/betplay.json
+    [GET] https://themes.betty.kambicdn.com/icons/4.111.0/sport.svg
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/betplay/group.json?channel_id=1&client_id=200&lang=es_CO&market=CO
+    [POST] https://o255634.ingest.sentry.io/api/6520765/envelope/?sentry_version=7&sentry_key=01a2c898cca34cdf9d47463da8a60b3c&sent
+    [GET] https://control-panel.fra-hub.workload.shapegamescloud.com/betplay/api/highlights/highlight/slug/frontpage?market=CO&lan
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/betplay/event/live/open.json?lang=es_CO&market=CO&client_id=200&chan
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/betplay/group/highlight.json?lang=es_CO&market=CO&client_id=200&chan
+    [GET] https://cf-mt-auth-api.kambicdn.com/player/api/v2019/betplay/reward/status/ACTIVE,IN_USE,USED,EXPIRED.json?channel_id=1&
+    [GET] https://api.vaix.ai/api/ui/settings/?filters=type%3Aeq%3Awidget_settings%3Boperator%3Aeq%3Abetplay&operator=betplay
+    [POST] https://api.vaix.ai/api/tracker/events?operator=betplay
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/betplay/category/combined_layout,list_view/sport/FOOTBALL?lang=es_CO
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/betplay/category/combined_layout,list_view/sport/AMERICAN_FOOTBALL?l
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/betplay/category/combined_layout,list_view/sport/ICE_HOCKEY?lang=es_
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/betplay/category/combined_layout,list_view/sport/TENNIS?lang=es_CO&m
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/betplay/category/combined_layout,list_view/sport/BASKETBALL?lang=es_
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/betplay/event/live/open.json?channel_id=1&lang=es_CO&market=CO
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/betplay/group.json?lang=es_CO&market=CO
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/betplay/oddsLadder
+    [GET] https://offering.sbo.fra-hub.workload.shapegamescloud.com/betplay/api/events/count/in_running?market=CO&lang=es-CO
+    [GET] https://offering.sbo.fra-hub.workload.shapegamescloud.com/betplay/api/prepacks?prepack_id=7322384&highlights_eligible=tr
+    [GET] https://offering.sbo.fra-hub.workload.shapegamescloud.com/betplay/api/compact_events?event=1027334717&event=1027027387&e
+    [GET] https://us.offering-api.kambicdn.com/coupon/v2018/betplay/coupon/2507.json?lang=es_CO&market=CO&client_id=200&channel_id
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/betplay/betoffer/event/1027334717.json?channel_id=1&client_id=200&in
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/betplay/betoffer/event/1027027387.json?channel_id=1&client_id=200&in
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/betplay/betoffer/event/1027469613.json?channel_id=1&client_id=200&in
+    [POST] https://analytics.google.com/g/collect?v=2&tid=G-R5DCCNVR5D&gtm=45je6550h2v9196250212z89196241682za20gzb9196241682zd9196
+    [POST] https://analytics.google.com/g/collect?v=2&tid=G-EY95QXMHE6&gtm=45je6550h2v9135189210za20gzd9196241682&_p=1778036293306&
+    [GET] https://apicms.betplay.com.co/api/v1/betslip/banners/get-banners
+    [POST] https://analytics.google.com/g/collect?v=2&tid=G-JDCDXSL1G7&gtm=45je6550h2v884878429z878081619za20gzb78081619zd78081619&
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/betplay/listView/football/colombia/liga_betplay_dimayor/all/matches.
+    [POST] https://api.trafficguard.ai/tg-g-015848-001/api/v4/client-side/validate/event
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/betplay/listView/football/colombia/liga_betplay_dimayor/all/competit
+    [POST] https://ads.mythad.com/log/common/co/api
+    [POST] https://analytics.google.com/g/collect?v=2&tid=G-R5DCCNVR5D&gtm=45je6550h2v9196250212za20gzb9196241682zd9196241682&_p=17
+    [POST] https://analytics.google.com/g/collect?v=2&tid=G-JDCDXSL1G7&gtm=45je6550h2v884878429za20gzb78081619zd78081619&_p=1778036
+
+=======================================================
+CASA: Wplay  |  https://www.wplay.co/deportes/baloncesto/nba
+  URL final  : https://www.wplay.co/pagina-no-encontrada
+  Titulo     : Wplay.co en línea
+  API calls relevantes (8):
+    [POST] https://www.google.com/ccm/collect?rcb=2&frm=0&ae=g&en=page_view&dl=https%3A%2F%2Fwww.wplay.co%2Fdeportes%2Fbaloncesto%2
+    [GET] https://openapi.wplay.co/socket.io/1/?t=1778036305942
+    [POST] https://analytics.google.com/g/collect?v=2&tid=G-3WYELKH4S2&gtm=45je6541v871449222z8831596320za20gzb831596320zd831596320
+    [POST] https://2c-1138a2e087744ef69e662051fe044c44.ecs.us-west-1.on.aws/events?cee=no
+    [POST] https://www.google-analytics.com/j/collect?v=1&_v=j102&a=1547905443&t=pageview&_s=1&dl=https%3A%2F%2Fwww.wplay.co%2Fdepo
+    [GET] https://www.wplay.co/pageInfo/deportes/baloncesto/nba/es_ES_desktop_GUEST?t=1777540554705
+    [GET] https://openapi.wplay.co/socket.io/1/?t=1778036308467
+
+=======================================================
+CASA: Rushbet  |  https://www.rushbet.co/?page=sportsbook#filter/all
+  URL final  : https://www.rushbet.co/?page=sportsbook#filter/all
+  Titulo     : Apuestas Deportivas | Casa de Apuestas En Línea | Rushbet
+  API calls relevantes (72):
+    [POST] https://wa.appsflyersdk.com/events?site-id=88b14d3d-8e9a-4167-be85-c1904f6d2730
+    [GET] https://www.rushbet.co/conf/api.json?t=202646250
+    [GET] https://www.rushbet.co/conf/sportsSettings.json?t=202646250
+    [GET] https://www.rushbet.co/api/service/account/time/57?t=202646250
+    [GET] https://www.rushbet.co/api/service/promojackpot/player/jackpot/value/57
+    [GET] https://www.rushbet.co/api/service/avatars?cageCode=57
+    [GET] https://www.rushbet.co/api/service/account/time/57?_=1778036314175
+    [GET] https://www.rushbet.co/api/service/account/time/57?cageCode=57
+    [POST] https://www.google.com/rmkt/collect/702840347/?random=1778036314682&cv=11&fst=1778036314682&fmt=8&bg=ffffff&guid=ON&asyn
+    [GET] https://www.googleadservices.com/pagead/conversion/702840347/?random=1778036314856&cv=11&fst=1778036314856&bg=ffffff&gui
+    [POST] https://www.google.com/rmkt/collect/702840347/?random=1778036314863&cv=11&fst=1778036314863&fmt=8&bg=ffffff&guid=ON&asyn
+    [GET] https://www.googleadservices.com/pagead/conversion/702840347/?random=1778036314868&cv=11&fst=1778036314868&bg=ffffff&gui
+    [POST] https://www.google-analytics.com/g/collect?v=2&tid=G-L9SDPMQQ4N&gtm=45je6541h1v9114190898z879166179za200zb888059145zd888
+    [POST] https://googleads.g.doubleclick.net/pagead/viewthroughconversion/702840347/?random=832806201&cv=11&fst=1778036314868&bg=
+    [POST] https://googleads.g.doubleclick.net/pagead/viewthroughconversion/702840347/?random=2102632244&cv=11&fst=1778036314856&bg
+    [POST] https://www.google-analytics.com/j/collect?v=1&_v=j102&a=1112564804&t=pageview&_s=1&dl=https%3A%2F%2Fwww.rushbet.co%2F%3
+    [POST] https://mpc-prod-24-s6uit34pua-uw.a.run.app/events?cee=no
+    [GET] https://www.google.com/pagead/1p-conversion/702840347/?random=832806201&cv=11&fst=1778036314868&bg=ffffff&guid=ON&async=
+    [GET] https://www.google.com/pagead/1p-conversion/702840347/?random=2102632244&cv=11&fst=1778036314856&bg=ffffff&guid=ON&async
+    [GET] https://www.google.com.co/pagead/1p-conversion/702840347/?random=832806201&cv=11&fst=1778036314868&bg=ffffff&guid=ON&asy
+    [GET] https://www.google.com.co/pagead/1p-conversion/702840347/?random=2102632244&cv=11&fst=1778036314856&bg=ffffff&guid=ON&as
+    [POST] https://www.google.com/rmkt/collect/17533845196/?random=1778036315442&cv=11&fst=1778036315442&fmt=8&bg=ffffff&guid=ON&as
+    [POST] https://api.xtremepush.com/push/api/deviceCreate
+    [GET] https://www.rushbet.co/conf/sportsTranslations-SPA.json?t=202646250
+    [GET] https://www.rushbet.co/conf/sportsUiWidget.json?t=202646250
+    [GET] https://www.rushbet.co/conf/eventViews.json?t=202646250
+    [GET] https://www.rushbet.co/conf/sportsNavigation.json?t=202646250
+    [GET] https://www.rushbet.co/conf/sportsWidgetBar.json?t=202646250
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/rsico/group.json?t=1778036316708&lang=es_ES&market=CO
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-search.svg
+    [POST] https://api.xtremepush.com/push/api/deviceUpdate
+    [GET] https://settings-api.kambicdn.com/rsico__microFrontends.json
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-football.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-basketball.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-tennis.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-american_football.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-baseball.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-chess.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-handball.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-bowling.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-boxing.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-cycling.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-cricket.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-darts.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-motorsports.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-wintersports.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-esports.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-e_basketball.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-formula_1.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-australian_rules.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-futsal.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-golf.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-ice_hockey.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-lacrosse.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-rugby_league.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-rugby_union.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-snooker.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-surfing.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-table_tennis.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-martial_arts.svg
+    [GET] https://micro-frontends.rushstreetcontent.com/ui-component-library-sports/1.67.0/svg/icon-volleyball.svg
+    [GET] https://www.rushbet.co/api/service/sportsbook/offering/sgp/popular?maxLegs=4&pageNr=1&pageSize=5&sgpType=POPULAR&cageCod
+    [GET] https://www.rushbet.co/conf/sportsBranding.json?t=202646250
+    [GET] https://settings-api.kambicdn.com/rsico.json
+    [GET] https://themes.betty.kambicdn.com/icons/4.109.0/sport.svg
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/rsico/group.json?channel_id=1&client_id=200&lang=es_ES&market=CO
+    [POST] https://o255634.ingest.sentry.io/api/6520765/envelope/?sentry_version=7&sentry_key=01a2c898cca34cdf9d47463da8a60b3c&sent
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/rsico/group/highlight.json?lang=es_ES&market=CO&client_id=200&channe
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/rsico/listView/all.json?lang=es_ES&market=CO&client_id=200&channel_i
+    [GET] https://us.offering-api.kambicdn.com/offering/v2018/rsico/event/live/open.json?lang=es_ES&market=CO&client_id=200&channe
+
+=======================================================
+CASA: Betsson  |  https://www.betsson.co/
+  URL final  : https://www.betsson.co/
+  Titulo     : Apuestas deportivas y casino online | Betsson
+  API calls relevantes (21):
+    [GET] https://www.betsson.co/api/v1/content/groups/general-image
+    [GET] https://www.betsson.co/api/v1/content/groups/general
+    [GET] https://www.betsson.co/api/v1/content/groups/casino
+    [GET] https://www.betsson.co/api/v1/content/groups/common
+    [GET] https://www.betsson.co/api/v2/content/documentgroups/desktop-common-icons
+    [GET] https://www.betsson.co/cdn/fraud/api/fl/idgib-w-bab-betsson
+    [GET] https://www.betsson.co/api/v2/content/documentgroups/mobile-common-menus
+    [GET] https://www.betsson.co/api/v2/content/documentgroups/mobile-common-icons
+    [GET] https://www.betsson.co/api/v2/content/documentgroups/home-page-faq
+    [GET] https://www.betsson.co/api/v2/content/documentgroups/play-with-us-section
+    [GET] https://www.betsson.co/api/v2/content/documentgroups/quicklink
+    [GET] https://www.betsson.co/api/v3/content/filtered-content/SponsorshipBanner?isLoggedIn=false&jurisdiction=COGA
+    [GET] https://www.betsson.co/api/v3/content/filtered-content/commonpromotion?isLoggedIn=false&jurisdiction=COGA
+    [GET] https://www.betsson.co/api/v1/content/groups/common-image
+    [GET] https://www.betsson.co/api/v1/pagecontent?segments=general:home&includeTranslatedRoutes=true
+    [POST] https://www.betsson.co/cdn/fraud/api/fl?u=9b4cba40-42b7-11ef-a7bb-222281000000&cfidsgib-w-bab-betsson=ZYVtFMaDw7IJ0BI4hc
+    [POST] https://www.betsson.co/cdn/fraud/api/fl?u=9b4cba40-42b7-11ef-a7bb-222281000000&cfidsgib-w-bab-betsson=dF5sbH0sKWrYPZGT7S
+
+=======================================================
+CASA: Bwin  |  https://www.bwin.co/es/sports/baloncesto-7/nba-35
+  URL final  : https://www.bwin.co/es/sports/baloncesto-7/nba-35
+  Titulo     : 
+  API calls relevantes (0):

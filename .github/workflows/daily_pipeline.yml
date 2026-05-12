@@ -1,0 +1,82 @@
+name: Betplay – NBA Daily Pipeline
+
+on:
+  # Ejecuta todos los días a las 12:00 UTC (07:00 ET, después de resultados nocturnos)
+  schedule:
+    - cron: "0 12 * * *"
+
+  # Permite ejecución manual desde la pestaña Actions
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Fecha a procesar (YYYY-MM-DD). Vacío = hoy."
+        required: false
+        default: ""
+      season:
+        description: "Temporada NBA (e.g. 2024-25)"
+        required: false
+        default: "2024-25"
+      output:
+        description: "Exportar CSVs de debug (csv | none)"
+        required: false
+        default: "none"
+
+jobs:
+  pipeline:
+    name: Run Daily Pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python ───────────────────────────────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # ── 3. Dependencias ─────────────────────────────────────────────────────
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 4. Pipeline principal ───────────────────────────────────────────────
+      - name: Run pipeline
+        env:
+          # Base de datos
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # The Odds API (opcional)
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          # Configuración
+          NBA_SEASON:  ${{ github.event.inputs.season || '2024-25' }}
+          LOG_LEVEL:   INFO
+        run: |
+          DATE_ARG="${{ github.event.inputs.date }}"
+          OUTPUT_ARG="${{ github.event.inputs.output || 'none' }}"
+
+          if [ -n "$DATE_ARG" ]; then
+            python main.py --date "$DATE_ARG" --output "$OUTPUT_ARG"
+          else
+            python main.py --output "$OUTPUT_ARG"
+          fi
+
+      # ── 5. Subir logs como artefacto ─────────────────────────────────────
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: betplay-logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 7
+
+      # ── 6. Subir CSVs de debug (solo si se solicitaron) ──────────────────
+      - name: Upload debug CSVs
+        if: ${{ github.event.inputs.output == 'csv' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: betplay-csvs-${{ github.run_id }}
+          path: output/
+          retention-days: 3
