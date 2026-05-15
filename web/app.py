@@ -470,6 +470,71 @@ def _build_response(date_str, games_df, predictions_df, odds_df, value_bets_df) 
     }
 
 
+def _log_bets_to_journal(data: dict, bankroll: float) -> None:
+    """Guarda en output/bet_journal.csv los partidos con valor detectado.
+    Solo escribe entradas nuevas (no duplica si el game_id ya existe)."""
+    BASE         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    journal_path = os.path.join(BASE, "output", "bet_journal.csv")
+    date_str     = data.get("date", "")
+    model_ver    = os.environ.get("MODEL_VERSION", "?")
+
+    # Leer journal existente
+    existing_ids: set[str] = set()
+    rows: list[dict] = []
+    if os.path.exists(journal_path):
+        try:
+            jdf = pd.read_csv(journal_path, dtype=str)
+            rows = jdf.to_dict("records")
+            existing_ids = {str(r.get("game_id", "")) for r in rows}
+        except Exception:
+            pass
+
+    logged_dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    new_rows: list[dict] = []
+
+    for game in data.get("games", []):
+        gid = str(game.get("game_id", ""))
+        if not gid or gid in existing_ids:
+            continue
+
+        # Por cada lado (home/away), guardar SÓLO el mejor bookmaker (mayor Kelly).
+        # Un partido real = máximo una apuesta por lado; no se apuesta dos veces
+        # al mismo equipo porque la cotizó Betplay Y Rushbet.
+        best_per_side: dict[str, dict] = {}  # side -> mejor vb
+        for vb in game.get("value_bets", []):
+            if not vb.get("is_value_bet") or vb.get("kelly_pct", 0) <= 0:
+                continue
+            side = vb["side"]
+            if side not in best_per_side or vb["kelly_pct"] > best_per_side[side]["kelly_pct"]:
+                best_per_side[side] = vb
+
+        for vb in best_per_side.values():
+            bet_amount     = max(1, round(bankroll * vb["kelly_pct"] / 200))
+            potential_gain = round(bet_amount * (vb["odds"] - 1))
+            new_rows.append({
+                "game_id":          gid,
+                "game_date":        date_str,
+                "logged_date":      logged_dt,
+                "home_team":        game.get("home_team", ""),
+                "away_team":        game.get("away_team", ""),
+                "predicted_side":   vb["side"],
+                "team_name":        vb["team"],
+                "model_version":    model_ver,
+                "model_prob_pct":   vb["model_prob_pct"],
+                "odds":             vb["odds"],
+                "kelly_pct":        vb["kelly_pct"],
+                "bankroll_snapshot": bankroll,
+                "bet_amount":       bet_amount,
+                "potential_gain":   potential_gain,
+            })
+        if new_rows:
+            existing_ids.add(gid)
+
+    if new_rows:
+        all_rows = rows + new_rows
+        pd.DataFrame(all_rows).to_csv(journal_path, index=False)
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/", include_in_schema=False)
@@ -478,16 +543,26 @@ def root():
 
 
 @app.get("/api/analysis")
-def get_analysis(date: Optional[str] = Query(default=None)):
+def get_analysis(date: Optional[str] = Query(default=None),
+                 bankroll: float = Query(default=500_000)):
     """Ejecuta el pipeline completo y devuelve el análisis del día."""
     import time
     date_str = date or _date_cls.today().isoformat()
     cached = _CACHE.get(date_str)
     if cached and (time.time() - cached["ts"]) < _CACHE_TTL:
+        # Aunque esté cacheado, intentar loguear (puede ser nuevo bankroll)
+        try:
+            _log_bets_to_journal(cached["data"], bankroll)
+        except Exception:
+            pass
         return cached["data"]
     try:
         data = _run_pipeline(date_str)
         _CACHE[date_str] = {"data": data, "ts": time.time()}
+        try:
+            _log_bets_to_journal(data, bankroll)
+        except Exception as log_exc:
+            logger.warning("No se pudo loguear al journal: %s", log_exc)
     except Exception as exc:
         logger.error("Pipeline error [%s]: %s", date_str, exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
@@ -507,28 +582,37 @@ def clear_cache(date: Optional[str] = Query(default=None)):
 
 @app.get("/api/backtest")
 def get_backtest(bankroll: float = Query(default=500_000)):
-    """Simula el rendimiento histórico apostando un 2 % del bankroll inicial por predicción."""
-    from collections import defaultdict
+    """Historial real de apuestas: lee bet_journal.csv y cruza con line_scores para resultados."""
+    BASE         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    journal_path = os.path.join(BASE, "output", "bet_journal.csv")
+    pred_path    = os.path.join(BASE, "output", "predictions.csv")
+    ls_path      = os.path.join(BASE, "output", "line_scores.csv")
 
-    BASE      = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    pred_path = os.path.join(BASE, "output", "predictions.csv")
-    ls_path   = os.path.join(BASE, "output", "line_scores.csv")
-    vb_path   = os.path.join(BASE, "output", "value_bets.csv")
+    # ── Cargar journal ────────────────────────────────────────────────────────
+    if not os.path.exists(journal_path):
+        return {
+            "initial_bankroll": bankroll,
+            "current_bankroll": bankroll,
+            "total_profit": 0,
+            "total_bets": 0, "total_wins": 0, "total_losses": 0,
+            "win_rate": 0, "roi": 0, "strategy": "Kelly ½",
+            "models": {}, "daily": [], "sparkline": [],
+            "empty": True,
+        }
 
-    if not os.path.exists(pred_path):
-        raise HTTPException(status_code=404, detail="No hay predicciones guardadas en output/predictions.csv")
-
-    predictions_df = pd.read_csv(pred_path)
+    journal_df = pd.read_csv(journal_path)
 
     # ── Mapa game_id → home_team_id (desde predictions.csv) ──────────────────
     home_map: dict[str, int] = {}
-    for _, r in predictions_df.iterrows():
-        gid = str(r.get("game_id", ""))
-        hid = int(r.get("home_team_id", 0) or 0)
-        if gid:
-            home_map[gid] = hid
+    if os.path.exists(pred_path):
+        pred_df = pd.read_csv(pred_path)
+        for _, r in pred_df.iterrows():
+            gid = str(r.get("game_id", ""))
+            hid = int(r.get("home_team_id", 0) or 0)
+            if gid:
+                home_map[gid] = hid
 
-    # ── Resultados reales (ganador: "home" | "away") ──────────────────────────
+    # ── Resultados reales ─────────────────────────────────────────────────────
     actual_winner: dict[str, str] = {}
     if os.path.exists(ls_path):
         ls_df = pd.read_csv(ls_path)
@@ -539,68 +623,70 @@ def get_backtest(bankroll: float = Query(default=500_000)):
             winner_tid = int(grp.loc[grp["pts"].idxmax(), "team_id"])
             actual_winner[gid_str] = "home" if winner_tid == home_map.get(gid_str, -1) else "away"
 
-    # ── Mejores cuotas disponibles por (game_id, side) ───────────────────────
-    best_odds: dict[tuple, float] = {}
-    if os.path.exists(vb_path):
-        vb_df = pd.read_csv(vb_path)
-        for _, r in vb_df.iterrows():
-            key      = (str(r.get("game_id", "")), str(r.get("side", "")))
-            odds_val = float(r.get("odds", 0) or 0)
-            if odds_val > best_odds.get(key, 0):
-                best_odds[key] = odds_val
-
-    # ── Simulación ────────────────────────────────────────────────────────────
-    unit    = round(bankroll * 0.02)   # 2 % del bankroll inicial por apuesta
+    # ── Construir registros desde el journal ──────────────────────────────────
     records: list[dict] = []
+    for _, row in journal_df.iterrows():
+        gid           = str(row.get("game_id", ""))
+        game_date     = str(row.get("game_date", ""))[:10]
+        home_team     = str(row.get("home_team", ""))
+        away_team     = str(row.get("away_team", ""))
+        predicted     = str(row.get("predicted_side", ""))
+        team_name     = str(row.get("team_name", ""))
+        model_v       = str(row.get("model_version", "?"))
+        odds_val      = float(row.get("odds", 1.91) or 1.91)
+        kelly_pct     = float(row.get("kelly_pct", 0) or 0)
+        bet_amount    = int(float(row.get("bet_amount", 0) or 0))
+        pot_gain      = int(float(row.get("potential_gain", 0) or 0))
+        model_prob_pct = float(row.get("model_prob_pct", 50) or 50)
 
-    for _, p in predictions_df.iterrows():
-        gid      = str(p.get("game_id", ""))
-        actual   = actual_winner.get(gid)
-        if not actual:
-            continue   # partido futuro o sin datos de score
-
-        predicted = str(p.get("predicted_winner", ""))
-        model_v   = str(p.get("model_version", "?"))
-        game_date = str(p.get("game_date", ""))[:10]
-        home_id   = int(p.get("home_team_id",    0) or 0)
-        away_id   = int(p.get("visitor_team_id", 0) or 0)
-        home_prob = float(p.get("home_win_prob", 0.5) or 0.5)
-        away_prob = float(p.get("away_win_prob", 0.5) or 0.5)
-
-        odds_val = best_odds.get((gid, predicted), 1.91)
-        correct  = (predicted == actual)
-        pl       = unit * (odds_val - 1) if correct else -unit
+        actual = actual_winner.get(gid)        # None si aún no hay resultado
+        if actual is not None:
+            correct = (predicted == actual)
+            pl      = pot_gain if correct else -bet_amount
+            status  = "win" if correct else "loss"
+        else:
+            correct = None
+            pl      = None
+            status  = "pending"
 
         records.append({
-            "game_id":   gid,
-            "game_date": game_date,
-            "model":     model_v,
-            "home_team": _TEAMS_MAP.get(home_id, str(home_id)),
-            "away_team": _TEAMS_MAP.get(away_id, str(away_id)),
-            "predicted": predicted,
-            "actual":    actual,
-            "correct":   correct,
-            "odds":      round(odds_val, 2),
-            "home_prob": round(home_prob * 100, 1),
-            "away_prob": round(away_prob * 100, 1),
-            "pl":        round(pl),
+            "game_id":        gid,
+            "game_date":      game_date,
+            "model":          model_v,
+            "home_team":      home_team,
+            "away_team":      away_team,
+            "predicted":      predicted,
+            "actual":         actual,
+            "team_name":      team_name,
+            "correct":        correct,
+            "status":         status,
+            "odds":           round(odds_val, 2),
+            "kelly_pct":      round(kelly_pct, 2),
+            "model_prob_pct": round(model_prob_pct, 1),
+            "bet_amount":     bet_amount,
+            "potential_gain": pot_gain,
+            "pl":             pl,
         })
 
     records.sort(key=lambda x: (x["game_date"], x["game_id"]))
 
-    # Running bankroll cronológico
-    running = bankroll
+    # Running bankroll: solo apuestas resueltas, en orden cronológico
+    rb = bankroll
     for r in records:
-        running += r["pl"]
-        r["running_bankroll"] = round(running)
+        if r["status"] != "pending":
+            rb = round(rb + r["pl"])
+        r["running_bankroll"] = rb   # muestra bankroll actual después de cada apuesta resuelta
 
-    # ── Estadísticas por modelo ───────────────────────────────────────────────
+    # ── Estadísticas por modelo (solo resueltas) ──────────────────────────────
     model_stats: dict[str, dict] = {}
     for r in records:
+        if r["status"] == "pending":
+            continue
         mv = r["model"]
         if mv not in model_stats:
-            model_stats[mv] = {"bets": 0, "wins": 0, "pl": 0}
-        model_stats[mv]["bets"] += 1
+            model_stats[mv] = {"bets": 0, "wins": 0, "pl": 0, "wagered": 0}
+        model_stats[mv]["bets"]    += 1
+        model_stats[mv]["wagered"] += r["bet_amount"]
         if r["correct"]:
             model_stats[mv]["wins"] += 1
         model_stats[mv]["pl"] += r["pl"]
@@ -608,28 +694,38 @@ def get_backtest(bankroll: float = Query(default=500_000)):
     for mv, ms in model_stats.items():
         ms["losses"]   = ms["bets"] - ms["wins"]
         ms["win_rate"] = round(ms["wins"] / ms["bets"] * 100, 1) if ms["bets"] else 0
-        ms["roi"]      = round(ms["pl"] / (ms["bets"] * unit) * 100, 1) if ms["bets"] and unit else 0
+        ms["roi"]      = round(ms["pl"] / ms["wagered"] * 100, 1) if ms["wagered"] else 0
         ms["pl"]       = round(ms["pl"])
+        ms["wagered"]  = round(ms["wagered"])
 
     # ── Agrupación diaria ─────────────────────────────────────────────────────
     daily: dict[str, dict] = {}
     for r in records:
         d = r["game_date"]
         if d not in daily:
-            daily[d] = {"date": d, "bets": [], "day_pl": 0, "running_bankroll": 0}
+            daily[d] = {"date": d, "bets": [], "day_pl": 0, "running_bankroll": bankroll,
+                        "day_wagered": 0, "has_pending": False}
         daily[d]["bets"].append(r)
-        daily[d]["day_pl"] += r["pl"]
+        if r["status"] != "pending":
+            daily[d]["day_pl"]      += r["pl"]
+            daily[d]["day_wagered"] += r["bet_amount"]
+        else:
+            daily[d]["has_pending"] = True
 
     daily_list = []
     for d in sorted(daily.keys()):
         entry = daily[d]
         entry["day_pl"]           = round(entry["day_pl"])
-        entry["running_bankroll"] = entry["bets"][-1]["running_bankroll"] if entry["bets"] else bankroll
+        entry["day_wagered"]      = round(entry["day_wagered"])
+        entry["running_bankroll"] = entry["bets"][-1]["running_bankroll"]
         daily_list.append(entry)
 
-    total_bets = len(records)
-    total_wins = sum(1 for r in records if r["correct"])
-    total_pl   = sum(r["pl"] for r in records)
+    resolved      = [r for r in records if r["status"] != "pending"]
+    total_bets    = len(resolved)
+    total_wins    = sum(1 for r in resolved if r["correct"])
+    total_pl      = sum(r["pl"] for r in resolved)
+    total_wagered = sum(r["bet_amount"] for r in resolved)
+    pending_count = len([r for r in records if r["status"] == "pending"])
 
     return {
         "initial_bankroll": bankroll,
@@ -638,15 +734,14 @@ def get_backtest(bankroll: float = Query(default=500_000)):
         "total_bets":       total_bets,
         "total_wins":       total_wins,
         "total_losses":     total_bets - total_wins,
+        "pending_count":    pending_count,
         "win_rate":         round(total_wins / total_bets * 100, 1) if total_bets else 0,
-        "roi":              round(total_pl / (total_bets * unit) * 100, 1) if total_bets and unit else 0,
-        "unit_size":        unit,
+        "roi":              round(total_pl / total_wagered * 100, 1) if total_wagered else 0,
+        "strategy":         "Kelly ½",
         "models":           dict(sorted(model_stats.items())),
         "daily":            daily_list,
-        "sparkline":        [{"date": d["date"], "bankroll": d["running_bankroll"]} for d in daily_list],
+        "sparkline":        [{"date": d["date"], "bankroll": d["running_bankroll"]} for d in daily_list if not d["has_pending"]],
     }
-
-
 
 
 # Archivos estáticos (al final para no interceptar rutas de la API)

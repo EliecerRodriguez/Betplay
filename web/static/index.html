@@ -226,6 +226,7 @@
     .bt-bet-row.win { border-left-color:var(--green); } .bt-bet-row.loss { border-left-color:var(--red); }
     .bt-bet-game { font-size:12px; font-weight:600; line-height:1.4; }
     .bt-bet-sub { font-size:10px; color:var(--text3); }
+    .bt-bet-row.pending { border-left-color: var(--accent); }
     .bt-bet-result { font-size:11px; font-weight:700; text-align:center; }
     .bt-bet-result.ok { color:var(--green); } .bt-bet-result.ko { color:var(--red); }
     .bt-bet-mv { text-align:center; }
@@ -291,7 +292,7 @@ document.addEventListener('DOMContentLoaded', () => {
 async function load(date) {
   setLoading(true);
   try {
-    const r = await fetch(`/api/analysis?date=${date}`);
+    const r = await fetch(`/api/analysis?date=${date}&bankroll=${STATE.bankroll}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
     STATE.data = await r.json();
     render(STATE.data);
@@ -622,9 +623,20 @@ async function loadBacktest() {
 }
 
 function renderBacktest(d) {
+  if (d.empty) {
+    document.getElementById('resultsBody').innerHTML = `
+      <div style="text-align:center;padding:60px 20px;color:var(--text3)">
+        <div style="font-size:48px;margin-bottom:16px">📊</div>
+        <div style="font-size:15px;font-weight:600;margin-bottom:8px">Sin historial aún</div>
+        <div style="font-size:13px">Actualiza el análisis de hoy para registrar las primeras apuestas.<br>Mañana, tras actualizar, verás aquí si ganaste o perdiste.</div>
+      </div>`;
+    return;
+  }
+
   const prof    = d.total_profit;
   const profCls = prof >= 0 ? 'bc-green' : 'bc-red';
   const sign    = n => n >= 0 ? '+' : '';
+  const pendTxt = d.pending_count > 0 ? `<span style="color:var(--accent);font-size:12px;font-weight:600;">⏳ ${d.pending_count} pendiente${d.pending_count!==1?'s':''}</span>` : '';
 
   const summary = `
     <div class="bt-summary">
@@ -632,8 +644,8 @@ function renderBacktest(d) {
       <div class="bt-card ${profCls}"><div class="bc-label">Ganancia / Pérdida</div><div class="bc-val">${sign(prof)}${fmt(prof)}</div></div>
       <div class="bt-card ${d.roi >= 0 ? 'bc-green' : 'bc-red'}"><div class="bc-label">ROI</div><div class="bc-val">${sign(d.roi)}${d.roi}%</div></div>
       <div class="bt-card bc-orange"><div class="bc-label">% Aciertos</div><div class="bc-val">${d.win_rate}%</div></div>
-      <div class="bt-card"><div class="bc-label">Apuestas (G/P)</div><div class="bc-val" style="color:var(--text);font-size:18px">${d.total_wins}W&nbsp;/&nbsp;${d.total_losses}L</div></div>
-      <div class="bt-card"><div class="bc-label">Monto por apuesta</div><div class="bc-val" style="color:var(--purple)">${fmt(d.unit_size)}</div></div>
+      <div class="bt-card"><div class="bc-label">Apuestas (G/P) ${pendTxt}</div><div class="bc-val" style="color:var(--text);font-size:18px">${d.total_wins}W&nbsp;/&nbsp;${d.total_losses}L</div></div>
+      <div class="bt-card"><div class="bc-label">Estrategia</div><div class="bc-val" style="color:var(--purple);font-size:16px">${d.strategy}</div></div>
     </div>`;
 
   const chart = buildBtChart(d.sparkline, d.initial_bankroll);
@@ -666,17 +678,32 @@ function renderBacktest(d) {
 
   // ── Historial diario ─────────────────────────────────────────────────────
   const dailyHtml = [...d.daily].reverse().map((day, i) => {
-    const plCls  = day.day_pl >= 0 ? 'pos' : 'neg';
+    const plCls     = day.day_pl > 0 ? 'pos' : day.day_pl < 0 ? 'neg' : '';
+    const pendBadge = day.has_pending ? ' <span style="color:var(--accent);font-size:10px">⏳</span>' : '';
+    const plDisplay = day.has_pending && day.day_pl === 0 ? '' : `<span class="bt-day-pl ${plCls}">${sign(day.day_pl)}${fmt(day.day_pl)}</span>`;
     const dLabel = new Date(day.date + 'T12:00:00').toLocaleDateString('es-CO', { weekday:'short', day:'numeric', month:'short', year:'numeric' });
     const betsHtml = day.bets.map(b => {
-      const predTeam   = b.predicted === 'home' ? b.home_team : b.away_team;
-      const actualTeam = b.actual    === 'home' ? b.home_team : b.away_team;
-      const predProb   = b.predicted === 'home' ? b.home_prob : b.away_prob;
+      const predTeam = b.predicted === 'home' ? b.home_team : b.away_team;
+      const predProb = b.model_prob_pct || (b.predicted === 'home' ? b.home_prob : b.away_prob);
+      if (b.status === 'pending') {
+        return `
+          <div class="bt-bet-row pending">
+            <div>
+              <div class="bt-bet-game">${b.home_team} vs ${b.away_team}</div>
+              <div class="bt-bet-sub">▶ ${b.team_name} (${predProb}%) &nbsp;·&nbsp; Kelly ${b.kelly_pct}% &nbsp;·&nbsp; Apostar: ${fmt(b.bet_amount)} &nbsp;·&nbsp; Ganancia si gana: +${fmt(b.potential_gain)}</div>
+            </div>
+            <div class="bt-bet-result" style="color:var(--accent)">⏳ PENDIENTE</div>
+            <div class="bt-bet-mv"><span class="mv-chip">${b.model}</span></div>
+            <div class="bt-bet-odds">×${b.odds}</div>
+            <div class="bt-bet-pl-val" style="color:var(--text3)">?</div>
+          </div>`;
+      }
+      const actualTeam = b.actual === 'home' ? b.home_team : b.away_team;
       return `
         <div class="bt-bet-row ${b.correct ? 'win' : 'loss'}">
           <div>
             <div class="bt-bet-game">${b.home_team} vs ${b.away_team}</div>
-            <div class="bt-bet-sub">▶ ${predTeam} (${predProb}%) &nbsp;·&nbsp; Apuesta: ${fmt(d.unit_size)}</div>
+            <div class="bt-bet-sub">▶ ${b.team_name} (${predProb}%) &nbsp;·&nbsp; Kelly ${b.kelly_pct}% &nbsp;·&nbsp; Apostado: ${fmt(b.bet_amount)} &nbsp;·&nbsp; ${b.correct ? 'Ganancia: +'+fmt(b.potential_gain) : 'Pérdida: -'+fmt(b.bet_amount)}</div>
           </div>
           <div class="bt-bet-result ${b.correct ? 'ok' : 'ko'}">${b.correct ? '✓ GANÓ' : '✗ PERDIÓ'}<br><span style="font-size:10px;font-weight:400">${actualTeam}</span></div>
           <div class="bt-bet-mv"><span class="mv-chip">${b.model}</span></div>
@@ -687,10 +714,10 @@ function renderBacktest(d) {
     return `
       <div class="bt-day">
         <div class="bt-day-head" onclick="toggleBtDay(${i})">
-          <div class="bt-day-date">${dLabel}</div>
+          <div class="bt-day-date">${dLabel}${pendBadge}</div>
           <div class="bt-day-meta">
             <span class="bt-day-cnt">${day.bets.length} apuesta${day.bets.length!==1?'s':''}</span>
-            <span class="bt-day-pl ${plCls}">${sign(day.day_pl)}${fmt(day.day_pl)}</span>
+            ${plDisplay}
             <span class="bt-day-br">${fmt(day.running_bankroll)}</span>
           </div>
         </div>
