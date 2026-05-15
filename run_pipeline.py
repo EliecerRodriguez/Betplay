@@ -25,6 +25,8 @@ from ingestion.injuries_client import adjust_predictions
 from ingestion.nba_client import get_daily_games, get_combined_team_stats
 from ingestion.odds_client import get_odds
 from ingestion.recent_form import enrich_with_form
+from ingestion.travel_client import enrich_with_travel
+from model.monte_carlo import enrich_predictions_with_mc
 from model.predictor import predict
 from model.value_detector import detect_value_bets
 from processing.features import build_features, clean_team_stats
@@ -77,7 +79,14 @@ def run(date_str: str) -> dict[str, pd.DataFrame]:
         logger.warning("enrich_with_form falló (%s) — sin forma reciente", exc)
         games_enriched = games_df
 
-    # 4. Elo
+    # 4. Viaje y jet lag
+    logger.info("Enriqueciendo con datos de viaje y jet lag …")
+    try:
+        games_enriched = enrich_with_travel(games_enriched, NBA_SEASON)
+    except Exception as exc:
+        logger.warning("enrich_with_travel falló (%s) — sin features de viaje", exc)
+
+    # 5. Elo
     try:
         current_elos = load_current_elos("models/current_elos.json")
         if current_elos:
@@ -86,7 +95,7 @@ def run(date_str: str) -> dict[str, pd.DataFrame]:
     except Exception as exc:
         logger.debug("Elo no disponible: %s", exc)
 
-    # 5. Features
+    # 6. Features
     feature_df = build_features(games_enriched, team_stats_df) if not team_stats_df.empty else pd.DataFrame()
     if not feature_df.empty:
         feature_df["fetch_date"] = date_str
@@ -101,6 +110,13 @@ def run(date_str: str) -> dict[str, pd.DataFrame]:
             predictions_df = adjust_predictions(predictions_df, games_df, season=NBA_SEASON)
         except Exception as exc:
             logger.warning("adjust_predictions falló: %s", exc)
+
+        # 6b. Monte Carlo — enriquece predicciones con simulaciones
+        logger.info("Ejecutando simulaciones Monte Carlo …")
+        try:
+            predictions_df = enrich_predictions_with_mc(predictions_df, feature_df)
+        except Exception as exc:
+            logger.warning("Monte Carlo falló: %s", exc)
 
     # 7. Cuotas
     logger.info("Obteniendo cuotas …")

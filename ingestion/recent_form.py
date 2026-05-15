@@ -59,7 +59,8 @@ def _get_team_game_log(team_id: int, season: str) -> pd.DataFrame:
         df["WON"] = (df["WL"] == "W").astype(int) if "WL" in df.columns else float("nan")
         # Ordenar cronológicamente
         df = df.sort_values("GAME_DATE").reset_index(drop=True)
-        result = df[["GAME_ID", "GAME_DATE", "WON", "PTS_SCORED", "PTS_ALLOWED"]]
+        extra_cols = [c for c in ["MATCHUP"] if c in df.columns]
+        result = df[["GAME_ID", "GAME_DATE", "WON", "PTS_SCORED", "PTS_ALLOWED"] + extra_cols]
         _GAME_LOG_CACHE[key] = {"df": result, "ts": time.time()}
         return result
     except Exception as exc:

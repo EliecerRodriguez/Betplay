@@ -505,5 +505,149 @@ def clear_cache(date: Optional[str] = Query(default=None)):
     return {"status": "ok", "cleared": date or "all"}
 
 
+@app.get("/api/backtest")
+def get_backtest(bankroll: float = Query(default=500_000)):
+    """Simula el rendimiento histórico apostando un 2 % del bankroll inicial por predicción."""
+    from collections import defaultdict
+
+    BASE      = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    pred_path = os.path.join(BASE, "output", "predictions.csv")
+    ls_path   = os.path.join(BASE, "output", "line_scores.csv")
+    vb_path   = os.path.join(BASE, "output", "value_bets.csv")
+
+    if not os.path.exists(pred_path):
+        raise HTTPException(status_code=404, detail="No hay predicciones guardadas en output/predictions.csv")
+
+    predictions_df = pd.read_csv(pred_path)
+
+    # ── Mapa game_id → home_team_id (desde predictions.csv) ──────────────────
+    home_map: dict[str, int] = {}
+    for _, r in predictions_df.iterrows():
+        gid = str(r.get("game_id", ""))
+        hid = int(r.get("home_team_id", 0) or 0)
+        if gid:
+            home_map[gid] = hid
+
+    # ── Resultados reales (ganador: "home" | "away") ──────────────────────────
+    actual_winner: dict[str, str] = {}
+    if os.path.exists(ls_path):
+        ls_df = pd.read_csv(ls_path)
+        for gid, grp in ls_df.groupby("game_id"):
+            gid_str = str(gid)
+            if len(grp) < 2:
+                continue
+            winner_tid = int(grp.loc[grp["pts"].idxmax(), "team_id"])
+            actual_winner[gid_str] = "home" if winner_tid == home_map.get(gid_str, -1) else "away"
+
+    # ── Mejores cuotas disponibles por (game_id, side) ───────────────────────
+    best_odds: dict[tuple, float] = {}
+    if os.path.exists(vb_path):
+        vb_df = pd.read_csv(vb_path)
+        for _, r in vb_df.iterrows():
+            key      = (str(r.get("game_id", "")), str(r.get("side", "")))
+            odds_val = float(r.get("odds", 0) or 0)
+            if odds_val > best_odds.get(key, 0):
+                best_odds[key] = odds_val
+
+    # ── Simulación ────────────────────────────────────────────────────────────
+    unit    = round(bankroll * 0.02)   # 2 % del bankroll inicial por apuesta
+    records: list[dict] = []
+
+    for _, p in predictions_df.iterrows():
+        gid      = str(p.get("game_id", ""))
+        actual   = actual_winner.get(gid)
+        if not actual:
+            continue   # partido futuro o sin datos de score
+
+        predicted = str(p.get("predicted_winner", ""))
+        model_v   = str(p.get("model_version", "?"))
+        game_date = str(p.get("game_date", ""))[:10]
+        home_id   = int(p.get("home_team_id",    0) or 0)
+        away_id   = int(p.get("visitor_team_id", 0) or 0)
+        home_prob = float(p.get("home_win_prob", 0.5) or 0.5)
+        away_prob = float(p.get("away_win_prob", 0.5) or 0.5)
+
+        odds_val = best_odds.get((gid, predicted), 1.91)
+        correct  = (predicted == actual)
+        pl       = unit * (odds_val - 1) if correct else -unit
+
+        records.append({
+            "game_id":   gid,
+            "game_date": game_date,
+            "model":     model_v,
+            "home_team": _TEAMS_MAP.get(home_id, str(home_id)),
+            "away_team": _TEAMS_MAP.get(away_id, str(away_id)),
+            "predicted": predicted,
+            "actual":    actual,
+            "correct":   correct,
+            "odds":      round(odds_val, 2),
+            "home_prob": round(home_prob * 100, 1),
+            "away_prob": round(away_prob * 100, 1),
+            "pl":        round(pl),
+        })
+
+    records.sort(key=lambda x: (x["game_date"], x["game_id"]))
+
+    # Running bankroll cronológico
+    running = bankroll
+    for r in records:
+        running += r["pl"]
+        r["running_bankroll"] = round(running)
+
+    # ── Estadísticas por modelo ───────────────────────────────────────────────
+    model_stats: dict[str, dict] = {}
+    for r in records:
+        mv = r["model"]
+        if mv not in model_stats:
+            model_stats[mv] = {"bets": 0, "wins": 0, "pl": 0}
+        model_stats[mv]["bets"] += 1
+        if r["correct"]:
+            model_stats[mv]["wins"] += 1
+        model_stats[mv]["pl"] += r["pl"]
+
+    for mv, ms in model_stats.items():
+        ms["losses"]   = ms["bets"] - ms["wins"]
+        ms["win_rate"] = round(ms["wins"] / ms["bets"] * 100, 1) if ms["bets"] else 0
+        ms["roi"]      = round(ms["pl"] / (ms["bets"] * unit) * 100, 1) if ms["bets"] and unit else 0
+        ms["pl"]       = round(ms["pl"])
+
+    # ── Agrupación diaria ─────────────────────────────────────────────────────
+    daily: dict[str, dict] = {}
+    for r in records:
+        d = r["game_date"]
+        if d not in daily:
+            daily[d] = {"date": d, "bets": [], "day_pl": 0, "running_bankroll": 0}
+        daily[d]["bets"].append(r)
+        daily[d]["day_pl"] += r["pl"]
+
+    daily_list = []
+    for d in sorted(daily.keys()):
+        entry = daily[d]
+        entry["day_pl"]           = round(entry["day_pl"])
+        entry["running_bankroll"] = entry["bets"][-1]["running_bankroll"] if entry["bets"] else bankroll
+        daily_list.append(entry)
+
+    total_bets = len(records)
+    total_wins = sum(1 for r in records if r["correct"])
+    total_pl   = sum(r["pl"] for r in records)
+
+    return {
+        "initial_bankroll": bankroll,
+        "current_bankroll": round(bankroll + total_pl),
+        "total_profit":     round(total_pl),
+        "total_bets":       total_bets,
+        "total_wins":       total_wins,
+        "total_losses":     total_bets - total_wins,
+        "win_rate":         round(total_wins / total_bets * 100, 1) if total_bets else 0,
+        "roi":              round(total_pl / (total_bets * unit) * 100, 1) if total_bets and unit else 0,
+        "unit_size":        unit,
+        "models":           dict(sorted(model_stats.items())),
+        "daily":            daily_list,
+        "sparkline":        [{"date": d["date"], "bankroll": d["running_bankroll"]} for d in daily_list],
+    }
+
+
+
+
 # Archivos estáticos (al final para no interceptar rutas de la API)
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")

@@ -25,7 +25,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.ensemble import RandomForestClassifier, StackingClassifier, VotingClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.inspection import permutation_importance
@@ -102,6 +102,8 @@ def _build_pipeline(model_type: str = MODEL_TYPE, xgb_params: dict | None = None
       random_forest — RandomForestClassifier + calibración
       logistic      — LogisticRegression (baseline interpretable)
       ensemble      — Voting entre XGBoost + RF + LR calibrados
+      stacking      — Meta-modelo: XGBoost + RF + LR → meta LogisticRegression
+                      (usa TimeSeriesSplit para evitar data leakage temporal)
 
     Args:
         xgb_params: Hiperparámetros XGBoost a sobreescribir (de Optuna).
@@ -116,6 +118,34 @@ def _build_pipeline(model_type: str = MODEL_TYPE, xgb_params: dict | None = None
             random_state=42, n_jobs=-1,
         )
         classifier = CalibratedClassifierCV(base, method="isotonic", cv=5)
+
+    elif model_type == "stacking" and _XGB_AVAILABLE:
+        # ── Meta-modelo de stacking ───────────────────────────────────────────
+        # Los modelos base generan predicciones out-of-fold (cv=5 estratificado);
+        # el meta-modelo LogisticRegression aprende cuándo confiar en cada uno.
+        # No se usa TimeSeriesSplit aquí porque cross_val_predict requiere
+        # que TODOS los samples aparezcan en algún fold de test (particiones),
+        # y TimeSeriesSplit excluye los primeros samples de cualquier test fold.
+        # LogisticRegression como meta ya produce probabilidades bien calibradas.
+        xgb_s = XGBClassifier(
+            n_estimators=300, max_depth=5, learning_rate=0.04,
+            subsample=0.8, colsample_bytree=0.8, min_child_weight=3,
+            eval_metric="logloss", random_state=42, n_jobs=-1,
+        )
+        rf_s  = RandomForestClassifier(
+            n_estimators=200, max_depth=6, min_samples_leaf=5,
+            random_state=42, n_jobs=-1,
+        )
+        lr_s  = LogisticRegression(max_iter=1000, random_state=42)
+        meta  = LogisticRegression(max_iter=1000, C=0.5, random_state=42)
+        classifier = StackingClassifier(
+            estimators=[("xgb", xgb_s), ("rf", rf_s), ("lr", lr_s)],
+            final_estimator=meta,
+            cv=5,                   # StratifiedKFold(5) — crea particiones completas
+            stack_method="predict_proba",
+            passthrough=False,
+            n_jobs=-1,
+        )
 
     elif model_type == "ensemble" and _XGB_AVAILABLE:
         xgb = XGBClassifier(

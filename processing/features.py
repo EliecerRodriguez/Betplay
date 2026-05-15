@@ -238,7 +238,14 @@ def build_features(
 
     if "home_rest_days" in feature_df.columns and "visitor_rest_days" in feature_df.columns:
         feature_df["rest_advantage"] = feature_df["home_rest_days"] - feature_df["visitor_rest_days"]
-
+    # ── Features de viaje y jet lag (si ya se enriquecieron con enrich_with_travel) ──
+    if "home_tz_shift" in feature_df.columns and "visitor_tz_shift" in feature_df.columns:
+        # travel_tz_disadvantage ya viene calculado desde enrich_with_travel,
+        # pero lo (re)calculamos aquí como fallback por si el merge lo sobreescribió
+        if "travel_tz_disadvantage" not in feature_df.columns:
+            feature_df["travel_tz_disadvantage"] = (
+                feature_df["visitor_tz_shift"] - feature_df["home_tz_shift"]
+            )
     # ── Features de Elo (si ya se enriquecieron con enrich_with_elo) ──────────
     # home_elo_pre, visitor_elo_pre, elo_diff, elo_home_win_prob → ya están en el df
 
@@ -345,8 +352,12 @@ def get_feature_columns() -> list[str]:
         "visitor_rest_days",
         "rest_advantage",
         "home_is_b2b",
-        "visitor_is_b2b",
-        # ── Elo (predictor dinámico más potente) ─────────────────
+        "visitor_is_b2b",        # ── Viaje y jet lag ─────────────────────────────────────────────────
+        "home_tz_shift",          # horas de desfase horario del equipo local
+        "visitor_tz_shift",       # horas de desfase horario del visitante
+        "travel_tz_disadvantage", # visitor_tz_shift - home_tz_shift (>0 = visitor más cansado)
+        "home_crossed_tz",        # zonas cruzadas con signo (local)
+        "visitor_crossed_tz",     # zonas cruzadas con signo (visitante)        # ── Elo (predictor dinámico más potente) ─────────────────
         "elo_diff",            # diferencial Elo home - visitor
         "home_elo_pre",        # rating Elo del local antes del partido
         "visitor_elo_pre",     # rating Elo del visitante

@@ -203,14 +203,17 @@ def build_training_data(
     seasons: List[str],
     cache_dir: str = "data/cache",
     enrich_form: bool = False,
+    enrich_travel: bool = False,
 ) -> Optional[tuple[pd.DataFrame, pd.Series]]:
     """
     Descarga datos históricos y construye (X, y) para entrenamiento.
 
     Args:
-        dates:     Lista de fechas a procesar.
-        seasons:   Lista de temporadas para obtener estadísticas de equipo.
-        cache_dir: Directorio de caché de partidos diarios.
+        dates:         Lista de fechas a procesar.
+        seasons:       Lista de temporadas para obtener estadísticas de equipo.
+        cache_dir:     Directorio de caché de partidos diarios.
+        enrich_form:   Añadir features de forma reciente.
+        enrich_travel: Añadir features de viaje/jet lag (requiere enrich_form).
 
     Returns:
         Tupla (X, y) o None si no hay suficientes datos.
@@ -262,7 +265,16 @@ def build_training_data(
             games_df = enrich_with_form(games_df, season=seasons[-1], n=5)
         except Exception as exc:
             logger.warning("enrich_with_form fall\u00f3 (%s) \u2014 se entrena sin forma reciente", exc)
-
+    # Enriquecer con viaje / jet lag si se pidió
+    if enrich_travel and seasons:
+        logger.info("Enriqueciendo con datos de viaje y jet lag…")
+        try:
+            from ingestion.travel_client import enrich_with_travel
+            if "game_date" not in games_df.columns and "game_date_est" in games_df.columns:
+                games_df["game_date"] = pd.to_datetime(games_df["game_date_est"]).dt.date
+            games_df = enrich_with_travel(games_df, season=seasons[-1])
+        except Exception as exc:
+            logger.warning("enrich_with_travel falló (%s) — se entrena sin features de viaje", exc)
     # Enriquecer con Elo (procesa partidos en orden cronol\u00f3gico)
     try:
         from ingestion.elo import enrich_with_elo, get_current_elos, save_current_elos
@@ -360,14 +372,19 @@ def parse_args() -> argparse.Namespace:
     # Modelo
     parser.add_argument(
         "--model",
-        choices=["random_forest", "logistic", "xgboost", "ensemble"],
-        default="xgboost",
-        help="Tipo de clasificador (default: xgboost).",
+        choices=["random_forest", "logistic", "xgboost", "ensemble", "stacking"],
+        default="stacking",
+        help="Tipo de clasificador (default: stacking).",
     )
     parser.add_argument(
         "--with-form",
         action="store_true",
         help="Incluir features de forma reciente y rest days (más lento).",
+    )
+    parser.add_argument(
+        "--with-travel",
+        action="store_true",
+        help="Incluir features de viaje y jet lag (requiere --with-form).",
     )
     parser.add_argument(
         "--optimize",
@@ -470,8 +487,16 @@ def main() -> int:
         return 0
 
     # ── Construir dataset ─────────────────────────────────────────────────────
-    enrich_form = getattr(args, "with_form", False)
-    result = build_training_data(dates, seasons, cache_dir=cache_dir, enrich_form=enrich_form)
+    enrich_form   = getattr(args, "with_form",   False)
+    enrich_travel = getattr(args, "with_travel", False) and enrich_form
+    if getattr(args, "with_travel", False) and not enrich_form:
+        logger.warning("--with-travel requiere --with-form; activando ambos.")
+        enrich_form   = True
+        enrich_travel = True
+    result = build_training_data(
+        dates, seasons, cache_dir=cache_dir,
+        enrich_form=enrich_form, enrich_travel=enrich_travel,
+    )
 
     if result is None:
         logger.error("No se pudo construir el dataset. Abortando.")
