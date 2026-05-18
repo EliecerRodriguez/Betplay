@@ -22,7 +22,7 @@ import pandas as pd
 from config.settings import NBA_SEASON
 from ingestion.elo import apply_elos_to_games, load_current_elos
 from ingestion.injuries_client import adjust_predictions
-from ingestion.nba_client import get_daily_games, get_combined_team_stats
+from ingestion.nba_client import get_daily_games, get_combined_team_stats, get_line_scores
 from ingestion.odds_client import get_odds
 from ingestion.recent_form import enrich_with_form
 from ingestion.travel_client import enrich_with_travel
@@ -176,6 +176,60 @@ def _upsert_csv(path: str, new_df: pd.DataFrame, key_cols: list[str]) -> None:
     logger.info("  ✓ %s actualizado (%d filas totales, +%d nuevas)", path, len(combined), len(new_df))
 
 
+def _fetch_pending_line_scores(date_str: str) -> None:
+    """
+    Descarga y guarda en line_scores.csv los resultados reales de partidos pasados
+    que aún no están registrados. Consulta las fechas del bet_journal que no tienen
+    línea en line_scores.csv todavía, más el día anterior a date_str.
+    Se ejecuta sin fallar aunque la API no esté disponible.
+    """
+    from datetime import timedelta
+
+    journal_path = os.path.join(OUTPUT_DIR, "bet_journal.csv")
+    ls_path      = os.path.join(OUTPUT_DIR, "line_scores.csv")
+    today        = date.fromisoformat(date_str)
+
+    # Siempre intentar el día anterior (los partidos de ayer ya terminaron)
+    dates_to_fetch: set[str] = {(today - timedelta(days=1)).isoformat()}
+
+    # Añadir todas las fechas pasadas del journal que puedan no tener resultados
+    if os.path.exists(journal_path):
+        try:
+            jdf = pd.read_csv(journal_path, dtype=str)
+            for d in jdf["game_date"].dropna().unique():
+                d_clean = str(d)[:10]
+                if d_clean < date_str:
+                    dates_to_fetch.add(d_clean)
+        except Exception as exc:
+            logger.warning("No se pudo leer bet_journal para detectar fechas pendientes: %s", exc)
+
+    # Detectar qué fechas ya tienen datos en line_scores.csv
+    existing_dates: set[str] = set()
+    if os.path.exists(ls_path):
+        try:
+            ls_existing = pd.read_csv(ls_path, usecols=["fetch_date"], dtype=str)
+            existing_dates = set(ls_existing["fetch_date"].dropna().str[:10].unique())
+        except Exception as exc:
+            logger.warning("No se pudo leer line_scores.csv para verificar fechas: %s", exc)
+
+    missing = sorted(dates_to_fetch - existing_dates)
+    if not missing:
+        logger.info("Line scores ya actualizados — nada que descargar.")
+        return
+
+    logger.info("Descargando line scores para %d fecha(s) pendiente(s): %s", len(missing), missing)
+    for fetch_date in missing:
+        try:
+            ls_df = get_line_scores(fetch_date)
+            if ls_df.empty:
+                logger.info("Sin line scores para %s (sin partidos ese día o sin resultados aún)", fetch_date)
+                continue
+            _upsert_csv(ls_path, ls_df, ["game_id", "team_id"])
+            logger.info("  ✓ Line scores guardados para %s (%d filas)", fetch_date, len(ls_df))
+        except Exception as exc:
+            logger.warning("Error descargando line scores para %s: %s", fetch_date, exc)
+
+
 def save_to_csv(data: dict[str, pd.DataFrame], append: bool = True) -> None:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -211,6 +265,12 @@ def main() -> int:
 
     data = run(date_str)
     save_to_csv(data, append=append)
+
+    # Descargar resultados reales de partidos pasados para alimentar el módulo de Resultados
+    try:
+        _fetch_pending_line_scores(date_str)
+    except Exception as exc:
+        logger.warning("_fetch_pending_line_scores falló (no crítico): %s", exc)
 
     predictions = data["predictions"]
     value_bets  = data["value_bets"]

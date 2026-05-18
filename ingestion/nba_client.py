@@ -72,9 +72,9 @@ def get_daily_games(game_date: Optional[str] = None) -> pd.DataFrame:
         team_scores = dfs[2].copy() # gameId, teamId, teamCity, teamName...
 
         # Separar home/visitor desde team_scores
-        # team_scores tiene 2 filas por partido; primera=visitor, segunda=home
-        visitor_df = team_scores.groupby("gameId").nth(0).reset_index()
-        home_df    = team_scores.groupby("gameId").nth(1).reset_index()
+        # En ScoreboardV3, team_scores tiene 2 filas por partido: primera=home, segunda=visitor
+        home_df    = team_scores.groupby("gameId").nth(0).reset_index()
+        visitor_df = team_scores.groupby("gameId").nth(1).reset_index()
 
         games_df = games_hdr.merge(visitor_df[["gameId","teamId"]].rename(
             columns={"teamId": "visitor_team_id"}), on="gameId", how="left")
@@ -122,6 +122,8 @@ def get_line_scores(game_date: Optional[str] = None) -> pd.DataFrame:
         _sleep()
         dfs = scoreboard.get_data_frames()
         df = dfs[2].copy() if len(dfs) >= 3 else pd.DataFrame()
+        if df.empty:
+            return pd.DataFrame()
         # ScoreboardV3 usa camelCase; normalizar a snake_case con mapeo explícito
         col_map = {
             "gameId":  "game_id",
@@ -130,6 +132,12 @@ def get_line_scores(game_date: Optional[str] = None) -> pd.DataFrame:
         }
         df = df.rename(columns=col_map)
         df.columns = [c.lower() for c in df.columns]
+        # Asegurar que pts es numérico (puede venir como string desde la API)
+        if "pts" in df.columns:
+            df["pts"] = pd.to_numeric(df["pts"], errors="coerce")
+        # Eliminar filas sin resultado (partidos no jugados / sin marcador)
+        if "pts" in df.columns:
+            df = df[df["pts"].notna() & (df["pts"] > 0)].reset_index(drop=True)
         df["fetch_date"] = game_date
         return df
 
