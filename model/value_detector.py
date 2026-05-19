@@ -21,6 +21,7 @@ from __future__ import annotations
 from datetime import date
 
 import pandas as pd
+from scipy.stats import norm
 
 from utils.logger import get_logger
 
@@ -28,6 +29,9 @@ logger = get_logger(__name__)
 
 # Umbral mínimo de valor para considerar una oportunidad
 VALUE_THRESHOLD = float(0)   # value > 0 es suficiente; se puede subir a 0.05 para filtrar ruido
+
+# Desviación estándar para el total de puntos del partido (√2 × SCORE_STD, donde SCORE_STD=11.5)
+TOTAL_STD = 16.27
 
 
 def detect_value_bets(
@@ -63,9 +67,13 @@ def detect_value_bets(
     today = date.today().isoformat()
 
     # ── Merge predicciones + cuotas por game_id ───────────────────────────────
+    pred_cols = ["game_id", "game_date", "home_win_prob", "away_win_prob",
+                 "home_team_id", "visitor_team_id"]
+    if "mc_total" in predictions_df.columns:
+        pred_cols.append("mc_total")
+
     merged = odds_df.merge(
-        predictions_df[["game_id", "game_date", "home_win_prob", "away_win_prob",
-                         "home_team_id", "visitor_team_id"]],
+        predictions_df[pred_cols],
         on="game_id",
         how="inner",
     )
@@ -98,6 +106,7 @@ def detect_value_bets(
                 "odds":         round(float(row["home_odds"]), 2),
                 "value":        round(home_value, 4),
                 "is_value_bet": home_value > value_threshold,
+                "total_line":   None,
                 "fetch_date":   today,
             })
 
@@ -114,6 +123,56 @@ def detect_value_bets(
                 "odds":         round(float(row["away_odds"]), 2),
                 "value":        round(away_value, 4),
                 "is_value_bet": away_value > value_threshold,
+                "total_line":   None,
+                "fetch_date":   today,
+            })
+
+        # Over / Under (solo si hay mc_total y cuotas O/U en la fila)
+        mc_total = row.get("mc_total")
+        over_line  = row.get("over_line")
+        over_odds  = row.get("over_odds")
+        under_odds = row.get("under_odds")
+
+        if (
+            pd.notna(mc_total)
+            and pd.notna(over_line)
+            and pd.notna(over_odds)
+            and pd.notna(under_odds)
+        ):
+            line = float(over_line)
+            mu   = float(mc_total)
+
+            # P(total > line) usando distribución normal con media=mc_total, std=TOTAL_STD
+            prob_over  = round(float(1 - norm.cdf(line, mu, TOTAL_STD)), 4)
+            prob_under = round(float(norm.cdf(line, mu, TOTAL_STD)), 4)
+
+            over_value  = (prob_over  * float(over_odds))  - 1
+            under_value = (prob_under * float(under_odds)) - 1
+
+            records.append({
+                "game_id":      game_id,
+                "game_date":    gdate,
+                "bookmaker":    bk,
+                "side":         "over",
+                "team_name":    f"OVER {line}",
+                "model_prob":   prob_over,
+                "odds":         round(float(over_odds), 2),
+                "value":        round(over_value, 4),
+                "is_value_bet": over_value > value_threshold,
+                "total_line":   line,
+                "fetch_date":   today,
+            })
+            records.append({
+                "game_id":      game_id,
+                "game_date":    gdate,
+                "bookmaker":    bk,
+                "side":         "under",
+                "team_name":    f"UNDER {line}",
+                "model_prob":   prob_under,
+                "odds":         round(float(under_odds), 2),
+                "value":        round(under_value, 4),
+                "is_value_bet": under_value > value_threshold,
+                "total_line":   line,
                 "fetch_date":   today,
             })
 

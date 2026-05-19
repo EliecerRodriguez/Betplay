@@ -21,7 +21,7 @@ import pandas as pd
 
 from config.settings import NBA_SEASON
 from ingestion.elo import apply_elos_to_games, load_current_elos
-from ingestion.injuries_client import adjust_predictions
+from ingestion.injuries_client import adjust_predictions, get_team_injury_impact
 from ingestion.nba_client import get_daily_games, get_combined_team_stats, get_line_scores
 from ingestion.odds_client import get_odds
 from ingestion.recent_form import enrich_with_form
@@ -100,7 +100,28 @@ def run(date_str: str) -> dict[str, pd.DataFrame]:
     if not feature_df.empty:
         feature_df["fetch_date"] = date_str
 
-    # 6. Predicciones
+    # 6b. Injury impact como feature de entrada al modelo (para modelos entrenados con él)
+    #     injury_impact_diff > 0 → visitante pierde más PPG → ventaja para el local
+    if not feature_df.empty:
+        try:
+            from nba_api.stats.static import teams as _nba_teams_static
+            _all_teams    = _nba_teams_static.get_teams()
+            _id_to_abbrev = {t["id"]: t["abbreviation"] for t in _all_teams}
+            _impact       = get_team_injury_impact(NBA_SEASON)
+
+            def _ppg_lost(team_id) -> float:
+                abbrev = _id_to_abbrev.get(int(team_id or 0), "")
+                return _impact.get(abbrev, 0.0)
+
+            feature_df["injury_impact_diff"] = feature_df.apply(
+                lambda r: _ppg_lost(r.get("visitor_team_id", 0)) - _ppg_lost(r.get("home_team_id", 0)),
+                axis=1,
+            )
+        except Exception as exc:
+            logger.debug("Injury feature para predicción no disponible: %s", exc)
+            feature_df["injury_impact_diff"] = 0.0
+
+    # 7. Predicciones
     logger.info("Generando predicciones …")
     predictions_df = predict(feature_df) if not feature_df.empty else pd.DataFrame()
 
@@ -111,7 +132,7 @@ def run(date_str: str) -> dict[str, pd.DataFrame]:
         except Exception as exc:
             logger.warning("adjust_predictions falló: %s", exc)
 
-        # 6b. Monte Carlo — enriquece predicciones con simulaciones
+        # 7b. Monte Carlo — enriquece predicciones con simulaciones
         logger.info("Ejecutando simulaciones Monte Carlo …")
         try:
             predictions_df = enrich_predictions_with_mc(predictions_df, feature_df)
@@ -247,9 +268,42 @@ def save_to_csv(data: dict[str, pd.DataFrame], append: bool = True) -> None:
                 logger.info("  ✓ %s guardado (%d filas)", path, len(df))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CLI
-# ─────────────────────────────────────────────────────────────────────────────
+def save_to_supabase(data: dict[str, pd.DataFrame]) -> None:
+    """
+    Sincroniza todos los DataFrames del pipeline con Supabase/PostgreSQL.
+
+    Se llama despues de save_to_csv() en el flujo de produccion.
+    Falla de forma silenciosa para no interrumpir el pipeline si la BD no esta
+    disponible (red caida, variable DATABASE_URL no configurada, etc.).
+    """
+    try:
+        from config.settings import DATABASE_URL
+        if not DATABASE_URL:
+            logger.debug("DATABASE_URL no configurado — omitiendo escritura en Supabase")
+            return
+    except Exception:
+        return
+
+    try:
+        from database.repository import DatabaseRepository
+        repo = DatabaseRepository()
+
+        if not data.get("games", pd.DataFrame()).empty:
+            repo.upsert_games(data["games"])
+
+        if not data.get("predictions", pd.DataFrame()).empty:
+            repo.upsert_predictions(data["predictions"])
+
+        if not data.get("odds", pd.DataFrame()).empty:
+            repo.upsert_odds(data["odds"])
+
+        if not data.get("value_bets", pd.DataFrame()).empty:
+            repo.upsert_value_bets(data["value_bets"])
+
+        repo.close()
+        logger.info("Supabase sincronizado correctamente")
+    except Exception as exc:
+        logger.warning("No se pudo sincronizar con Supabase (no critico): %s", exc)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -265,6 +319,7 @@ def main() -> int:
 
     data = run(date_str)
     save_to_csv(data, append=append)
+    save_to_supabase(data)
 
     # Descargar resultados reales de partidos pasados para alimentar el módulo de Resultados
     try:

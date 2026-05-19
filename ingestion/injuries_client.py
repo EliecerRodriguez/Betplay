@@ -337,3 +337,152 @@ def get_injuries_summary_for_game(
         "visitor_pts_lost":  round(visitor_pts_lost, 1),
         "net_impact":        round(home_pts_lost - visitor_pts_lost, 1),
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Proxy histórico de lesiones para entrenamiento
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_historical_injury_proxy(
+    seasons: "list[str]",
+    cache_dir: str = "data/cache",
+) -> pd.DataFrame:
+    """
+    Construye un proxy de impacto de lesiones histórico para el entrenamiento.
+
+    Problema que resuelve
+    ─────────────────────
+    El ajuste post-hoc de `adjust_predictions` aplica el efecto de lesiones DESPUÉS
+    de que el modelo ya emitió su probabilidad. Esto genera una inconsistencia:
+    el modelo nunca aprendió que "equipo sin estrella → menos probable ganar".
+    Esta función permite entrenar AL MODELO con ese conocimiento.
+
+    Método
+    ──────
+    Usa `LeagueGameLog` (NBA API) para obtener las estadísticas de todos los
+    jugadores en todos los partidos de cada temporada. Por cada partido-equipo
+    calcula cuántos PPG (promedio de temporada del jugador) aparecieron en cancha.
+    Compara con la media del equipo para estimar los PPG perdidos.
+
+      ppg_lost = max(0, ppg_expected_team − ppg_played_in_game)
+
+    Luego, al unir con games_df (que sabe quién era local y visitante):
+      injury_impact_diff = visitor_ppg_lost − home_ppg_lost
+        > 0 → visitante pierde más estrellas → ventaja para el local
+        < 0 → local pierde más estrellas → ventaja para el visitante
+
+    Rate limits
+    ───────────
+    Solo descarga una vez por temporada y guarda en data/cache/.
+    Las siguientes llamadas cargan directamente desde parquet.
+
+    Args:
+        seasons:   Lista de temporadas, e.g. ["2022-23", "2023-24", "2024-25"]
+        cache_dir: Directorio donde guardar/leer los game logs cacheados.
+
+    Returns:
+        DataFrame con columnas: game_id, home_ppg_lost, visitor_ppg_lost,
+        injury_impact_diff. Un DataFrame vacío si la API no está disponible.
+    """
+    import os
+
+    try:
+        from nba_api.stats.endpoints import LeagueGameLog as _LeagueGameLog
+    except ImportError:
+        logger.warning("get_historical_injury_proxy: nba_api no disponible")
+        return pd.DataFrame()
+
+    os.makedirs(cache_dir, exist_ok=True)
+    all_game_team_rows: list = []
+
+    for season in seasons:
+        safe_season = season.replace("-", "_")
+        cache_path  = os.path.join(cache_dir, f"league_game_log_{safe_season}.parquet")
+
+        # ── Cargar o descargar el game log de la temporada ────────────────────
+        if os.path.exists(cache_path):
+            df_season = pd.read_parquet(cache_path)
+            logger.info("get_historical_injury_proxy: %s cargado desde caché (%d filas)", season, len(df_season))
+        else:
+            logger.info("get_historical_injury_proxy: descargando LeagueGameLog %s …", season)
+            try:
+                time.sleep(1.2)   # rate limit
+                lg = _LeagueGameLog(
+                    season=season,
+                    player_or_team_abbreviation="P",  # estadísticas de jugadores
+                    timeout=60,
+                )
+                df_season = lg.get_data_frames()[0]
+                if not df_season.empty:
+                    df_season.to_parquet(cache_path, index=False)
+                    logger.info("  → %d filas guardadas en %s", len(df_season), cache_path)
+            except Exception as exc:
+                logger.warning("  → Error descargando %s: %s — saltando temporada", season, exc)
+                continue
+
+        if df_season.empty:
+            continue
+
+        # Normalizar nombres de columnas
+        df_season.columns = df_season.columns.str.lower()
+
+        # Columnas requeridas
+        required = {"game_id", "player_id", "team_id", "pts"}
+        if not required.issubset(set(df_season.columns)):
+            logger.warning("get_historical_injury_proxy: columnas inesperadas en %s — saltando", season)
+            continue
+
+        df_season["pts"]    = pd.to_numeric(df_season["pts"],    errors="coerce").fillna(0.0)
+        df_season["game_id"] = df_season["game_id"].astype(str)
+        df_season["team_id"] = pd.to_numeric(df_season["team_id"], errors="coerce")
+
+        # ── PPG promedio de temporada por jugador ─────────────────────────────
+        # Usamos SOLO su último equipo para evitar contaminación de traspasos
+        player_team_pts = (
+            df_season.groupby(["player_id", "team_id"])["pts"]
+            .mean()
+            .reset_index()
+            .rename(columns={"pts": "player_avg_ppg"})
+        )
+
+        # ── Suma de PPG de jugadores que aparecieron en cada juego-equipo ─────
+        df_with_avg = df_season.merge(player_team_pts, on=["player_id", "team_id"], how="left")
+        game_team_ppg = (
+            df_with_avg.groupby(["game_id", "team_id"])["player_avg_ppg"]
+            .sum()
+            .reset_index()
+            .rename(columns={"player_avg_ppg": "ppg_sum_in_game"})
+        )
+
+        # ── PPG esperado por equipo (promedio de todos sus partidos) ──────────
+        team_expected = (
+            game_team_ppg.groupby("team_id")["ppg_sum_in_game"]
+            .mean()
+            .rename("expected_ppg_sum")
+            .reset_index()
+        )
+        game_team_ppg = game_team_ppg.merge(team_expected, on="team_id", how="left")
+
+        # PPG perdido = cuánto "rendimiento de plantilla" faltó este partido
+        game_team_ppg["ppg_lost"] = (
+            game_team_ppg["expected_ppg_sum"] - game_team_ppg["ppg_sum_in_game"]
+        ).clip(lower=0.0)
+
+        all_game_team_rows.append(
+            game_team_ppg[["game_id", "team_id", "ppg_lost"]].copy()
+        )
+
+    if not all_game_team_rows:
+        logger.warning("get_historical_injury_proxy: no se pudo obtener datos para ninguna temporada")
+        return pd.DataFrame()
+
+    # ── Unir todas las temporadas ─────────────────────────────────────────────
+    game_team_df = pd.concat(all_game_team_rows, ignore_index=True)
+    game_team_df = game_team_df.dropna(subset=["game_id", "team_id", "ppg_lost"])
+
+    logger.info(
+        "get_historical_injury_proxy: %d registros partido-equipo generados "
+        "para %d temporadas",
+        len(game_team_df), len(seasons),
+    )
+    return game_team_df

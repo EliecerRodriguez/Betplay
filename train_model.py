@@ -36,6 +36,7 @@ from typing import List, Optional
 import pandas as pd
 
 from config.settings import NBA_API_DELAY, NBA_SEASON
+from ingestion.injuries_client import get_historical_injury_proxy
 from ingestion.nba_client import get_daily_games, get_line_scores, get_team_stats, get_combined_team_stats
 from model.predictor import train
 from processing.features import (
@@ -195,6 +196,119 @@ def _merge_scores(games_df: pd.DataFrame, scores_df: pd.DataFrame) -> pd.DataFra
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Stats rolling (point-in-time) — elimina look-ahead bias en entrenamiento
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _compute_rolling_stats_for_training(games_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calcula estadísticas punto-en-el-tiempo (point-in-time) para cada equipo
+    en cada partido, usando ÚNICAMENTE partidos completados ANTES de esa fecha.
+
+    Problema que resuelve
+    ─────────────────────
+    Cuando entrenamos, si usamos los stats de toda la temporada (ej. win% final
+    de abril) para un partido de noviembre, el modelo ve datos futuros que no
+    existían en el momento del partido (look-ahead bias). Esto infla el accuracy
+    en entrenamiento pero reduce la generalización en producción.
+
+    Stats calculados (solo requieren scores finales, ya disponibles en caché):
+      - w_pct_rolling  : win% acumulado hasta ese partido
+      - pts_rolling    : promedio de puntos anotados por partido
+      - pts_all_rolling: promedio de puntos recibidos
+
+    Para equipos con < MIN_GAMES partidos previos se devuelve NaN
+    (el imputer de medianas del pipeline lo resolverá).
+
+    Args:
+        games_df: DataFrame con columnas game_id, home_team_id, visitor_team_id,
+                  home_pts, visitor_pts, home_win, game_date (o game_date_est).
+
+    Returns:
+        DataFrame con columnas game_id + {home,visitor}_{w_pct,pts,pts_all}_rolling
+    """
+    MIN_GAMES = 5   # mínimo de partidos previos para que el stat sea confiable
+
+    df = games_df.copy()
+
+    # Normalizar columna de fecha
+    if "game_date" not in df.columns:
+        if "game_date_est" in df.columns:
+            df["game_date"] = pd.to_datetime(df["game_date_est"]).dt.date
+        else:
+            logger.warning("_compute_rolling_stats: sin columna de fecha — retornando sin rolling stats")
+            return pd.DataFrame({"game_id": df["game_id"]})
+
+    df["game_date"] = pd.to_datetime(df["game_date"]).dt.date
+    df = df.sort_values("game_date").reset_index(drop=True)
+
+    # Asegurar tipos numéricos
+    for col in ("home_pts", "visitor_pts", "home_win"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Acumuladores por equipo: {team_id: {"w": wins, "g": games, "pts_f": scored, "pts_a": allowed}}
+    team_acc: dict = {}
+
+    rows_out = []
+    for _, row in df.iterrows():
+        home_id = int(row["home_team_id"])
+        vis_id  = int(row["visitor_team_id"])
+        gid     = str(row["game_id"])
+
+        def _stat(tid: int) -> dict:
+            return team_acc.get(tid, {"w": 0, "g": 0, "pts_f": 0.0, "pts_a": 0.0})
+
+        hs = _stat(home_id)
+        vs = _stat(vis_id)
+
+        def _wpct(s: dict) -> "float | None":
+            return (s["w"] / s["g"]) if s["g"] >= MIN_GAMES else float("nan")
+
+        def _pts_f(s: dict) -> "float | None":
+            return (s["pts_f"] / s["g"]) if s["g"] >= MIN_GAMES else float("nan")
+
+        def _pts_a(s: dict) -> "float | None":
+            return (s["pts_a"] / s["g"]) if s["g"] >= MIN_GAMES else float("nan")
+
+        rows_out.append({
+            "game_id":                    gid,
+            "home_w_pct_rolling":         _wpct(hs),
+            "visitor_w_pct_rolling":      _wpct(vs),
+            "home_pts_rolling":           _pts_f(hs),
+            "visitor_pts_rolling":        _pts_f(vs),
+            "home_pts_allowed_rolling":   _pts_a(hs),
+            "visitor_pts_allowed_rolling": _pts_a(vs),
+        })
+
+        # Actualizar acumuladores CON el resultado de este partido (post-hoc)
+        home_won = int(row["home_win"]) if pd.notna(row.get("home_win")) else 0
+        h_pts  = float(row["home_pts"])    if pd.notna(row.get("home_pts"))    else 0.0
+        v_pts  = float(row["visitor_pts"]) if pd.notna(row.get("visitor_pts")) else 0.0
+
+        team_acc[home_id] = {
+            "w":     hs["w"] + home_won,
+            "g":     hs["g"] + 1,
+            "pts_f": hs["pts_f"] + h_pts,
+            "pts_a": hs["pts_a"] + v_pts,
+        }
+        team_acc[vis_id] = {
+            "w":     vs["w"] + (1 - home_won),
+            "g":     vs["g"] + 1,
+            "pts_f": vs["pts_f"] + v_pts,
+            "pts_a": vs["pts_a"] + h_pts,
+        }
+
+    result = pd.DataFrame(rows_out)
+    logger.info(
+        "_compute_rolling_stats: %d partidos procesados | "
+        "home_w_pct_rolling válido en %.1f%% de casos",
+        len(result),
+        result["home_w_pct_rolling"].notna().mean() * 100,
+    )
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Construcción del dataset de entrenamiento
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -292,6 +406,50 @@ def build_training_data(
         logger.error("El DataFrame de features quedó vacío tras el join.")
         return None
 
+    # ── Rolling stats (point-in-time) ────────────────────────────────────────
+    # Sobreescribe home_w_pct / visitor_w_pct / home_pts / visitor_pts con
+    # valores calculados solo con partidos ANTERIORES a cada game_date.
+    # Elimina el look-ahead bias: al entrenar un partido de noviembre,
+    # el modelo ya no "ve" los stats de abril de la misma temporada.
+    try:
+        rolling_df = _compute_rolling_stats_for_training(games_df)
+        if not rolling_df.empty and "home_w_pct_rolling" in rolling_df.columns:
+            feature_df = feature_df.merge(rolling_df, on="game_id", how="left")
+
+            # Sobreescribir solo donde el rolling stat es válido (≥ MIN_GAMES previos)
+            for side in ("home", "visitor"):
+                wpct_roll = f"{side}_w_pct_rolling"
+                wpct_orig = f"{side}_w_pct"
+                if wpct_roll in feature_df.columns and wpct_orig in feature_df.columns:
+                    valid = feature_df[wpct_roll].notna()
+                    feature_df.loc[valid, wpct_orig] = feature_df.loc[valid, wpct_roll]
+
+                pts_roll = f"{side}_pts_rolling"
+                pts_orig = f"{side}_pts"
+                if pts_roll in feature_df.columns and pts_orig in feature_df.columns:
+                    valid = feature_df[pts_roll].notna()
+                    feature_df.loc[valid, pts_orig] = feature_df.loc[valid, pts_roll]
+
+            # Recomputar features derivadas que dependen de w_pct y pts
+            if "home_w_pct" in feature_df.columns and "visitor_w_pct" in feature_df.columns:
+                feature_df["wpct_diff"] = feature_df["home_w_pct"] - feature_df["visitor_w_pct"]
+
+            # Limpiar columnas temporales de rolling
+            roll_tmp = [c for c in feature_df.columns if c.endswith("_rolling")]
+            feature_df.drop(columns=roll_tmp, inplace=True, errors="ignore")
+
+            logger.info(
+                "Rolling stats aplicados: wpct_diff y pts recalculados sin look-ahead bias "
+                "(%d/%d filas con w_pct rolling válido)",
+                (feature_df["wpct_diff"].notna()).sum(), len(feature_df),
+            )
+        else:
+            logger.warning("Rolling stats vacíos — se usan stats de temporada completa")
+    except Exception as exc:
+        logger.warning(
+            "Rolling stats fallaron (%s) — continuando con stats de temporada completa", exc
+        )
+
     # build_features busca 'home_team_score'/'visitor_team_score' para home_win,
     # pero _merge_scores generó 'home_pts'/'visitor_pts'.  Recuperamos home_win
     # desde games_df (que ya tiene el resultado calculado por _merge_scores).
@@ -306,6 +464,52 @@ def build_training_data(
                 "home_win inyectado desde marcadores: %d/%d partidos con resultado conocido",
                 feature_df["home_win"].notna().sum(), len(feature_df),
             )
+
+    # ── Proxy de lesiones históricas (point-in-time) ──────────────────────────
+    # Añade injury_impact_diff = visitor_ppg_lost - home_ppg_lost.
+    # Para partidos de temporadas completas disponemos de LeagueGameLog;
+    # para los que no hay datos se rellena con 0 (neutral — sin información).
+    try:
+        game_team_df = get_historical_injury_proxy(seasons, cache_dir)
+        if not game_team_df.empty:
+            # Pivotar a formato ancho: una fila por partido con home/visitor ppg_lost
+            game_team_df["team_id"] = game_team_df["team_id"].astype(float)
+            home_inj = (
+                games_df[["game_id", "home_team_id"]]
+                .assign(home_team_id=games_df["home_team_id"].astype(float))
+                .merge(
+                    game_team_df.rename(columns={"team_id": "home_team_id", "ppg_lost": "home_ppg_lost"}),
+                    on=["game_id", "home_team_id"], how="left",
+                )[["game_id", "home_ppg_lost"]]
+            )
+            vis_inj = (
+                games_df[["game_id", "visitor_team_id"]]
+                .assign(visitor_team_id=games_df["visitor_team_id"].astype(float))
+                .merge(
+                    game_team_df.rename(columns={"team_id": "visitor_team_id", "ppg_lost": "visitor_ppg_lost"}),
+                    on=["game_id", "visitor_team_id"], how="left",
+                )[["game_id", "visitor_ppg_lost"]]
+            )
+            inj_wide = home_inj.merge(vis_inj, on="game_id", how="outer")
+            inj_wide["injury_impact_diff"] = (
+                inj_wide["visitor_ppg_lost"].fillna(0) - inj_wide["home_ppg_lost"].fillna(0)
+            )
+            feature_df = feature_df.merge(
+                inj_wide[["game_id", "injury_impact_diff"]], on="game_id", how="left"
+            )
+            # Rellenar partidos sin datos de lesiones con 0 (neutral)
+            feature_df["injury_impact_diff"] = feature_df["injury_impact_diff"].fillna(0.0)
+            n_with = (feature_df["injury_impact_diff"] != 0).sum()
+            logger.info(
+                "Injury proxy añadido: %d/%d partidos con impacto != 0 (resto = 0 neutral)",
+                n_with, len(feature_df),
+            )
+        else:
+            feature_df["injury_impact_diff"] = 0.0
+            logger.warning("Injury proxy vacío — usando 0 neutral para todos los partidos")
+    except Exception as exc:
+        feature_df["injury_impact_diff"] = 0.0
+        logger.warning("Injury proxy falló (%s) — usando 0 neutral para todos los partidos", exc)
 
     # 4. Preparar dataset (filtra filos sin target, etc.)
     X, y = prepare_training_dataset(feature_df)

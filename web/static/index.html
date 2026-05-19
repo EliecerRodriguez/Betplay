@@ -184,6 +184,15 @@
     .badge-quest { background: rgba(68,138,255,.12); color: var(--blue); }
     .badge-other { background: rgba(138,143,168,.12); color: var(--text2); }
 
+    /* ── Over/Under (totales) ─────────────────────────────────────────────── */
+    .plan-stripe.totals_value { background: linear-gradient(180deg,#00bcd4,#448aff); }
+    .badge-totals { background: rgba(0,188,212,.15); color: #00bcd4; border: 1px solid rgba(0,188,212,.4); }
+    .action-banner.totals_value-banner { background: linear-gradient(135deg,#021218,#041e28); }
+    .action-type.totals_value-t { color: #00bcd4; }
+    .vb-item.is-vb-total { border-color: rgba(0,188,212,.3); background: linear-gradient(135deg,#081a1f,#0b2028); }
+    .total-pred-chip { display:flex; justify-content:center; padding:2px 20px 10px; }
+    .total-pred-chip span { background:rgba(0,188,212,.1); border:1px solid rgba(0,188,212,.3); color:#00bcd4; font-size:11px; font-weight:700; padding:3px 14px; border-radius:20px; letter-spacing:.5px; }
+
     ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: var(--bg); } ::-webkit-scrollbar-thumb { background: var(--bg-card2); border-radius: 3px; }
 
     /* ── Modal Resultados ─────────────────────────────────────────────────── */
@@ -345,8 +354,8 @@ function renderPlan(games) {
 
 function planItem(g, bankroll) {
   const a = g.action, t = a.type;
-  const badgeClass = { arb:'badge-arb', value:'badge-value', model:'badge-model' }[t];
-  const badgeText  = { arb:'⚡ ARBITRAJE', value:'📈 VALUE BET', model:'🎯 MODELO' }[t];
+  const badgeClass = { arb:'badge-arb', value:'badge-value', model:'badge-model', totals_value:'badge-totals' }[t] || 'badge-model';
+  const badgeText  = { arb:'⚡ ARBITRAJE', value:'📈 VALUE BET', model:'🎯 MODELO', totals_value:'📊 TOTAL O/U' }[t] || '🎯 MODELO';
   let line1 = a.line1, line2 = a.line2, kellyHtml = '';
   if (t === 'arb' && bankroll && g.arb) {
     const arb = g.arb;
@@ -357,7 +366,9 @@ function planItem(g, bankroll) {
     line2 = `▶ Apuesta <strong>${sA}</strong> a ${arb.away_side.team} en ${arb.away_side.bookmaker} (cuota ${arb.away_side.odds})`;
     kellyHtml = `<div class="plan-kelly"><div class="k-label">Ganancia garantizada</div><div class="k-amount">+${profit}</div><div class="k-sub">sobre ${fmt(bankroll)}</div></div>`;
   } else {
-    const top = g.value_bets.find(v => v.is_value_bet);
+    const topMl = g.value_bets.find(v => v.is_value_bet);
+    const topTt = (g.totals_value_bets || []).find(v => v.is_value_bet);
+    const top = topMl || topTt;
     if (top && bankroll && top.kelly_pct > 0) {
       const halfAmt = Math.round(bankroll * top.kelly_pct / 200);
       const gainAmt = Math.round(halfAmt * (top.odds - 1));
@@ -398,8 +409,8 @@ function renderGames(games) {
 function gameCard(g, bankroll) {
   const a = g.action, t = a.type;
   const bannerClass = t + '-banner';
-  const typeLabel   = { arb:'⚡ ARBITRAJE — GANANCIA GARANTIZADA', value:'📈 VALUE BET DETECTADO', model:'🎯 RECOMENDACIÓN MODELO' }[t];
-  const typeClr     = { arb:'arb-t', value:'value-t', model:'model-t' }[t];
+  const typeLabel   = { arb:'\u26a1 ARBITRAJE \u2014 GANANCIA GARANTIZADA', value:'\ud83d\udcc8 VALUE BET DETECTADO', model:'\ud83c\udfaf RECOMENDACI\u00d3N MODELO', totals_value:'\ud83d\udcca VALUE BET TOTAL (O/U) DETECTADO' }[t] || '\ud83c\udfaf RECOMENDACI\u00d3N MODELO';
+  const typeClr     = { arb:'arb-t', value:'value-t', model:'model-t', totals_value:'totals_value-t' }[t] || 'model-t';
   const homeFav     = g.home_win_prob >= g.away_win_prob;
 
   let al1 = a.line1, al2 = a.line2;
@@ -476,10 +487,37 @@ function gameCard(g, bankroll) {
     vbHtml = `<div class="vb-section"><div class="sub-hdr"><span>Análisis de valor detallado</span></div><div class="vb-list">${items}</div></div>`;
   }
 
+  let totalsHtml = '';
+  if (g.totals_value_bets && g.totals_value_bets.length > 0) {
+    const titems = g.totals_value_bets.map(v => {
+      const half = Math.round(bankroll * v.kelly_pct / 200);
+      return `
+        <div class="vb-item ${v.is_value_bet?'is-vb-total':''}">
+          <div class="vb-top">
+            <div><div class="vb-team">${v.team}</div><div class="vb-book">${v.bookmaker} · cuota ${v.odds.toFixed(2)}</div></div>
+            <span class="ev-pill ${v.value_pct>0?'ev-pos':'ev-neg'}">${v.value_pct>0?'+':''}${v.value_pct.toFixed(1)}% EV</span>
+          </div>
+          <div class="vb-stats">
+            <div class="vb-stat"><div class="vs-lbl">Prob. modelo</div><div class="vs-val">${v.model_prob_pct}%</div></div>
+            <div class="vb-stat"><div class="vs-lbl">Línea</div><div class="vs-val">${v.total_line}</div></div>
+            <div class="vb-stat"><div class="vs-lbl">Prob. implícita</div><div class="vs-val">${(100/v.odds).toFixed(1)}%</div></div>
+            ${v.kelly_pct>0?`<div class="vb-stat"><div class="vs-lbl">½ Kelly</div><div class="vs-val kelly-amt">${fmt(half)}</div></div>`:''}
+          </div>
+          ${v.is_value_bet&&v.kelly_pct>0?`<div class="kelly-box">Apostar <strong>${fmt(half)}</strong> · Ganancia potencial si acierta: <strong>+${fmt(half*(v.odds-1))}</strong></div>`:''}
+        </div>`;
+    }).join('');
+    const mcT = g.mc_total ? ` · Total pred.: ${g.mc_total} pts` : '';
+    totalsHtml = `<div class="vb-section"><div class="sub-hdr"><span>📊 O/U · Totales${mcT}</span></div><div class="vb-list">${titems}</div></div>`;
+  }
+
   let injHtml = g.injuries ? renderInjuries(g) : '';
 
+  const mcTotalHtml = g.mc_total
+    ? `<div class="total-pred-chip"><span>\ud83d\udcca TOTAL PREDICHO: ${g.mc_total} pts</span></div>`
+    : '';
+
   return `
-    <div class="game-card ${g.has_value?'has-value':''} ${g.arb?'has-arb':''}">
+    <div class="game-card ${(g.has_value||g.has_totals_value)?'has-value':''} ${g.arb?'has-arb':''}">
       <div class="action-banner ${bannerClass}">
         <div class="action-type ${typeClr}">${typeLabel}</div>
         <div class="action-label">${a.label}</div>
@@ -512,9 +550,11 @@ function gameCard(g, bankroll) {
           <div class="pb-away" style="width:${g.away_win_prob}%"></div>
         </div>
       </div>
+      ${mcTotalHtml}
       ${arbHtml}
       ${oddsHtml}
       ${vbHtml}
+      ${totalsHtml}
       ${injHtml}
     </div>`;
 }
@@ -698,11 +738,14 @@ function renderBacktest(d) {
             <div class="bt-bet-pl-val" style="color:var(--text3)">?</div>
           </div>`;
       }
-      const actualTeam = b.actual === 'home' ? b.home_team : b.away_team;
+      const actualTeam = (b.bet_type === 'total')
+        ? (b.actual ? (b.actual.toUpperCase() + ' ' + (b.total_line || '')) : '?')
+        : (b.actual === 'home' ? b.home_team : b.away_team);
+      const typeTag = b.bet_type === 'total' ? ' <span style="font-size:9px;background:rgba(0,188,212,.1);color:#00bcd4;border:1px solid rgba(0,188,212,.3);padding:1px 5px;border-radius:8px;font-weight:700">O/U</span>' : '';
       return `
         <div class="bt-bet-row ${b.correct ? 'win' : 'loss'}">
           <div>
-            <div class="bt-bet-game">${b.home_team} vs ${b.away_team}</div>
+            <div class="bt-bet-game">${b.home_team} vs ${b.away_team}${typeTag}</div>
             <div class="bt-bet-sub">▶ ${b.team_name} (${predProb}%) &nbsp;·&nbsp; Kelly ${b.kelly_pct}% &nbsp;·&nbsp; Apostado: ${fmt(b.bet_amount)} &nbsp;·&nbsp; ${b.correct ? 'Ganancia: +'+fmt(b.potential_gain) : 'Pérdida: -'+fmt(b.bet_amount)}</div>
           </div>
           <div class="bt-bet-result ${b.correct ? 'ok' : 'ko'}">${b.correct ? '✓ GANÓ' : '✗ PERDIÓ'}<br><span style="font-size:10px;font-weight:400">${actualTeam}</span></div>

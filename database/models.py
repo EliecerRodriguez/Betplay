@@ -150,12 +150,33 @@ class Prediction(Base):
     home_win_prob    = Column(Float)    # probabilidad victoria local [0-1]
     away_win_prob    = Column(Float)    # probabilidad victoria visitante [0-1]
     predicted_winner = Column(String(10))  # 'home' | 'away'
+    home_win         = Column(Integer)  # resultado real: 1=local ganó, 0=visitante ganó, NULL=pendiente
     model_version    = Column(String(20), default="v1")
     fetch_date       = Column(Date)
     created_at       = Column(DateTime, server_default=func.now())
 
     def __repr__(self):
         return f"<Prediction {self.game_id} home_prob={self.home_win_prob:.2f}>"
+
+
+# ── line_scores ───────────────────────────────────────────────────────────────
+
+class LineScore(Base):
+    __tablename__ = "line_scores"
+    __table_args__ = (
+        UniqueConstraint("game_id", "team_id", name="uq_line_score_game_team"),
+    )
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    game_id    = Column(String(20), nullable=False)
+    game_date  = Column(Date)
+    team_id    = Column(Integer, nullable=False)
+    pts        = Column(Integer)         # puntos anotados
+    fetch_date = Column(Date)
+    created_at = Column(DateTime, server_default=func.now())
+
+    def __repr__(self):
+        return f"<LineScore {self.game_id} team={self.team_id} pts={self.pts}>"
 
 
 # ── value_bets ────────────────────────────────────────────────────────────────

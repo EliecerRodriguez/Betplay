@@ -26,7 +26,7 @@ from nba_api.stats.static import teams as nba_teams_static
 from config.settings import NBA_SEASON
 from ingestion.elo import apply_elos_to_games, load_current_elos
 from ingestion.injuries_client import adjust_predictions, get_injuries_summary_for_game
-from ingestion.nba_client import get_combined_team_stats, get_daily_games, get_team_stats
+from ingestion.nba_client import get_combined_team_stats, get_daily_games, get_line_scores, get_team_stats
 from ingestion.odds_client import get_odds
 from ingestion.recent_form import enrich_with_form
 from model.predictor import predict
@@ -46,17 +46,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+_STATIC_DIR    = os.path.join(os.path.dirname(__file__), "static")
+_BASE_DIR      = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SNAPSHOTS_DIR = os.path.join(_BASE_DIR, "output", "snapshots")
 _TEAMS_MAP: dict[int, str] = {t["id"]: t["full_name"] for t in nba_teams_static.get_teams()}
 
 
 @app.on_event("startup")
 async def _startup_preload() -> None:
-    """Pre-carga stats de equipo en un hilo para que el primer request sea rápido."""
+    """Pre-carga stats de equipo y reconcilia resultados pasados en background."""
     import asyncio
     loop = asyncio.get_running_loop()
     loop.run_in_executor(None, _get_team_stats_cached)
-    logger.info("Startup: pre-carga de team stats lanzada en background")
+    loop.run_in_executor(None, _fetch_and_reconcile_results)
+    logger.info("Startup: pre-carga de team stats y reconciliación de resultados lanzadas en background")
 
 _CACHE: dict[str, dict] = {}   # key: date_str -> {"data": ..., "ts": float}
 _CACHE_TTL = 10 * 60           # 10 minutos — refresca cuotas y predicciones automáticamente
@@ -248,6 +251,17 @@ def _best_action(game: dict) -> dict:
             "line2": f"▶ Modelo: {top_vb['model_prob_pct']}% prob. real vs {100/top_vb['odds']:.1f}% implícita en cuota",
             "note":  f"Confianza {game['confidence']} · Kelly ½ = {top_vb['kelly_pct']/2:.2f}% del bankroll",
         }
+    top_total = next((v for v in game.get("totals_value_bets", []) if v["is_value_bet"]), None)
+    if top_total:
+        mc_t = game.get("mc_total") or 0.0
+        line = top_total.get("total_line") or 0.0
+        return {
+            "type":  "totals_value",
+            "label": f"APUESTA TOTAL: {top_total['team']}",
+            "line1": f"▶ Casa: {top_total['bookmaker']} · Cuota: {top_total['odds']} · EV esperado: +{top_total['value_pct']:.1f}%",
+            "line2": f"▶ Total predicho: {mc_t:.1f} pts · Línea: {line:.1f} · Modelo: {top_total['model_prob_pct']}%",
+            "note":  f"Confianza {game['confidence']} · Kelly ½ = {top_total['kelly_pct']/2:.2f}% del bankroll",
+        }
     side = game["recommended_side"]
     bm   = game["best_odds"][side]
     return {
@@ -314,6 +328,14 @@ def _run_pipeline(date_str: str) -> dict:
         except Exception as exc:
             logger.warning("adjust_predictions falló: %s — predicciones sin ajuste de lesiones", exc)
 
+    # 3c. Monte Carlo — enriquece predicciones con mc_total (necesario para O/U)
+    if not predictions_df.empty:
+        try:
+            from model.monte_carlo import enrich_predictions_with_mc
+            predictions_df = enrich_predictions_with_mc(predictions_df, feature_df)
+        except Exception as exc:
+            logger.warning("Monte Carlo falló: %s — sin mc_total para O/U", exc)
+
     # 4. Cuotas cacheadas por fecha para evitar scraping repetido cada request
     odds_df = _get_odds_cached(games_df, date_str)
 
@@ -350,11 +372,14 @@ def _build_response(date_str, games_df, predictions_df, odds_df, value_bets_df) 
 
         # Probabilidades
         home_prob = away_prob = 0.50
+        mc_total = None
         if not predictions_df.empty and "game_id" in predictions_df.columns:
             p = predictions_df[predictions_df["game_id"] == game_id]
             if not p.empty:
                 home_prob = float(p["home_win_prob"].iloc[0] or 0.5)
                 away_prob = float(p["away_win_prob"].iloc[0] or 0.5)
+                if "mc_total" in p.columns and pd.notna(p["mc_total"].iloc[0]):
+                    mc_total = round(float(p["mc_total"].iloc[0]), 1)
 
         max_prob     = max(home_prob, away_prob)
         home_is_fav  = home_prob >= away_prob
@@ -377,14 +402,23 @@ def _build_response(date_str, games_df, predictions_df, odds_df, value_bets_df) 
             ho = round(float(odd.get("home_odds", 0) or 0), 2)
             ao = round(float(odd.get("away_odds", 0) or 0), 2)
             bm = str(odd.get("bookmaker", ""))
-            odds_list.append({"bookmaker": bm, "home_odds": ho, "away_odds": ao})
+            ol = odd.get("over_line");  oo = odd.get("over_odds");  uo = odd.get("under_odds")
+            odds_list.append({
+                "bookmaker":  bm,
+                "home_odds":  ho,
+                "away_odds":  ao,
+                "over_line":  round(float(ol), 1)  if pd.notna(ol)  and ol  is not None else None,
+                "over_odds":  round(float(oo), 2)  if pd.notna(oo)  and oo  is not None else None,
+                "under_odds": round(float(uo), 2)  if pd.notna(uo)  and uo  is not None else None,
+            })
             if ho > best_home["odds"]:
                 best_home = {"bookmaker": bm, "odds": ho}
             if ao > best_away["odds"]:
                 best_away = {"bookmaker": bm, "odds": ao}
 
-        # Value bets
-        vb_list = []
+        # Value bets — separar moneyline (home/away) de totales (over/under)
+        vb_list         = []
+        totals_vb_list  = []
         if not value_bets_df.empty and "game_id" in value_bets_df.columns:
             for _, vb in value_bets_df[value_bets_df["game_id"] == game_id].iterrows():
                 is_vb    = bool(vb.get("is_value_bet", False))
@@ -394,9 +428,10 @@ def _build_response(date_str, games_df, predictions_df, odds_df, value_bets_df) 
                 kel      = _kelly(model_p, odd_v)
                 team_n   = str(vb.get("team_name", "") or "")
                 side_str = str(vb.get("side", ""))
+                tl       = vb.get("total_line")
                 if not team_n or team_n.replace(".", "").isdigit():
                     team_n = home_name if side_str == "home" else away_name
-                vb_list.append({
+                vb_obj = {
                     "team":           team_n,
                     "side":           side_str,
                     "bookmaker":      str(vb.get("bookmaker", "")),
@@ -405,9 +440,15 @@ def _build_response(date_str, games_df, predictions_df, odds_df, value_bets_df) 
                     "value_pct":      round(val * 100, 2),
                     "kelly_pct":      round(kel * 100, 3),
                     "is_value_bet":   is_vb,
-                })
+                    "total_line":     float(tl) if pd.notna(tl) and tl is not None else None,
+                }
+                if side_str in ("home", "away"):
+                    vb_list.append(vb_obj)
+                else:
+                    totals_vb_list.append(vb_obj)
 
         vb_list.sort(key=lambda x: x["value_pct"], reverse=True)
+        totals_vb_list.sort(key=lambda x: x["value_pct"], reverse=True)
 
         arb = _find_arbitrage(odds_list, home_name, away_name)
 
@@ -432,6 +473,7 @@ def _build_response(date_str, games_df, predictions_df, odds_df, value_bets_df) 
             "game_time":       game_time,
             "home_win_prob":   round(home_prob * 100, 1),
             "away_win_prob":   round(away_prob * 100, 1),
+            "mc_total":        mc_total,
             "recommended_bet": recommended,
             "recommended_side": rec_side,
             "confidence":      confidence,
@@ -440,6 +482,8 @@ def _build_response(date_str, games_df, predictions_df, odds_df, value_bets_df) 
             "best_odds":       {"home": best_home, "away": best_away},
             "value_bets":      vb_list,
             "has_value":       any(v["is_value_bet"] for v in vb_list),
+            "totals_value_bets": totals_vb_list,
+            "has_totals_value":  any(v["is_value_bet"] for v in totals_vb_list),
             "arb":             arb,
             "injuries":        injury_info,
             "injury_adjustment_pct": inj_adjustment,
@@ -447,11 +491,11 @@ def _build_response(date_str, games_df, predictions_df, odds_df, value_bets_df) 
         game_obj["action"] = _best_action(game_obj)
         games.append(game_obj)
 
-    # Ordenar: value bets primero, luego por confianza
+    # Ordenar: value bets (moneyline o totales) primero, luego por confianza
     conf_order = {"Alta": 0, "Media": 1, "Baja": 2}
-    games.sort(key=lambda g: (not g["has_value"], conf_order.get(g["confidence"], 3)))
+    games.sort(key=lambda g: (not (g["has_value"] or g.get("has_totals_value", False)), conf_order.get(g["confidence"], 3)))
 
-    all_vb  = [v for g in games for v in g["value_bets"] if v["is_value_bet"]]
+    all_vb  = [v for g in games for v in (g["value_bets"] + g.get("totals_value_bets", [])) if v["is_value_bet"]]
     best_vb = max(all_vb, key=lambda x: x["value_pct"], default=None)
     arb_games = [g for g in games if g["arb"]]
 
@@ -472,20 +516,23 @@ def _build_response(date_str, games_df, predictions_df, odds_df, value_bets_df) 
 
 def _log_bets_to_journal(data: dict, bankroll: float) -> None:
     """Guarda en output/bet_journal.csv los partidos con valor detectado.
-    Solo escribe entradas nuevas (no duplica si el game_id ya existe)."""
+    Solo escribe entradas nuevas (no duplica si el (game_id, predicted_side) ya existe)."""
     BASE         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     journal_path = os.path.join(BASE, "output", "bet_journal.csv")
     date_str     = data.get("date", "")
     model_ver    = os.environ.get("MODEL_VERSION", "?")
 
     # Leer journal existente
-    existing_ids: set[str] = set()
+    existing_keys: set[tuple] = set()  # (game_id, predicted_side)
     rows: list[dict] = []
     if os.path.exists(journal_path):
         try:
             jdf = pd.read_csv(journal_path, dtype=str)
             rows = jdf.to_dict("records")
-            existing_ids = {str(r.get("game_id", "")) for r in rows}
+            existing_keys = {
+                (str(r.get("game_id", "")), str(r.get("predicted_side", "")))
+                for r in rows
+            }
         except Exception:
             pass
 
@@ -494,13 +541,11 @@ def _log_bets_to_journal(data: dict, bankroll: float) -> None:
 
     for game in data.get("games", []):
         gid = str(game.get("game_id", ""))
-        if not gid or gid in existing_ids:
+        if not gid:
             continue
 
-        # Por cada lado (home/away), guardar SÓLO el mejor bookmaker (mayor Kelly).
-        # Un partido real = máximo una apuesta por lado; no se apuesta dos veces
-        # al mismo equipo porque la cotizó Betplay Y Rushbet.
-        best_per_side: dict[str, dict] = {}  # side -> mejor vb
+        # ── Moneyline: mejor bookmaker por lado (home/away) ───────────────────
+        best_per_side: dict[str, dict] = {}
         for vb in game.get("value_bets", []):
             if not vb.get("is_value_bet") or vb.get("kelly_pct", 0) <= 0:
                 continue
@@ -508,31 +553,271 @@ def _log_bets_to_journal(data: dict, bankroll: float) -> None:
             if side not in best_per_side or vb["kelly_pct"] > best_per_side[side]["kelly_pct"]:
                 best_per_side[side] = vb
 
-        for vb in best_per_side.values():
+        for side, vb in best_per_side.items():
+            if (gid, side) in existing_keys:
+                continue
             bet_amount     = max(1, round(bankroll * vb["kelly_pct"] / 200))
             potential_gain = round(bet_amount * (vb["odds"] - 1))
             new_rows.append({
-                "game_id":          gid,
-                "game_date":        date_str,
-                "logged_date":      logged_dt,
-                "home_team":        game.get("home_team", ""),
-                "away_team":        game.get("away_team", ""),
-                "predicted_side":   vb["side"],
-                "team_name":        vb["team"],
-                "model_version":    model_ver,
-                "model_prob_pct":   vb["model_prob_pct"],
-                "odds":             vb["odds"],
-                "kelly_pct":        vb["kelly_pct"],
+                "game_id":           gid,
+                "game_date":         date_str,
+                "logged_date":       logged_dt,
+                "home_team":         game.get("home_team", ""),
+                "away_team":         game.get("away_team", ""),
+                "predicted_side":    side,
+                "team_name":         vb["team"],
+                "model_version":     model_ver,
+                "model_prob_pct":    vb["model_prob_pct"],
+                "odds":              vb["odds"],
+                "kelly_pct":         vb["kelly_pct"],
                 "bankroll_snapshot": bankroll,
-                "bet_amount":       bet_amount,
-                "potential_gain":   potential_gain,
+                "bet_amount":        bet_amount,
+                "potential_gain":    potential_gain,
+                "bet_type":          "moneyline",
+                "total_line":        "",
             })
-        if new_rows:
-            existing_ids.add(gid)
+            existing_keys.add((gid, side))
+
+        # ── Totales: mejor bookmaker por lado (over/under) ────────────────────
+        best_totals: dict[str, dict] = {}
+        for vb in game.get("totals_value_bets", []):
+            if not vb.get("is_value_bet") or vb.get("kelly_pct", 0) <= 0:
+                continue
+            side = vb["side"]
+            if side not in best_totals or vb["kelly_pct"] > best_totals[side]["kelly_pct"]:
+                best_totals[side] = vb
+
+        for side, vb in best_totals.items():
+            if (gid, side) in existing_keys:
+                continue
+            bet_amount     = max(1, round(bankroll * vb["kelly_pct"] / 200))
+            potential_gain = round(bet_amount * (vb["odds"] - 1))
+            tl = vb.get("total_line")
+            new_rows.append({
+                "game_id":           gid,
+                "game_date":         date_str,
+                "logged_date":       logged_dt,
+                "home_team":         game.get("home_team", ""),
+                "away_team":         game.get("away_team", ""),
+                "predicted_side":    side,
+                "team_name":         vb["team"],
+                "model_version":     model_ver,
+                "model_prob_pct":    vb["model_prob_pct"],
+                "odds":              vb["odds"],
+                "kelly_pct":         vb["kelly_pct"],
+                "bankroll_snapshot": bankroll,
+                "bet_amount":        bet_amount,
+                "potential_gain":    potential_gain,
+                "bet_type":          "total",
+                "total_line":        tl if tl is not None else "",
+            })
+            existing_keys.add((gid, side))
 
     if new_rows:
         all_rows = rows + new_rows
         pd.DataFrame(all_rows).to_csv(journal_path, index=False)
+
+
+# ── Reconciliación predicciones → resultados reales ──────────────────────────
+
+def _fetch_and_reconcile_results() -> int:
+    """
+    Cierra el loop predicción → resultado real.
+
+    1. Lee predictions.csv; detecta filas con home_win vacío y game_date < hoy.
+    2. Por cada fecha pendiente: descarga line_scores si no están en line_scores.csv.
+    3. Calcula home_win (1 = local gana, 0 = visitante gana) desde los marcadores.
+    4. Actualiza predictions.csv con los resultados reales.
+    5. Persiste los nuevos line_scores en line_scores.csv.
+
+    Returns:
+        Número de predicciones actualizadas.
+    """
+    pred_path = os.path.join(_BASE_DIR, "output", "predictions.csv")
+    ls_path   = os.path.join(_BASE_DIR, "output", "line_scores.csv")
+    today_str = _date_cls.today().isoformat()
+
+    if not os.path.exists(pred_path):
+        return 0
+
+    try:
+        pred_df = pd.read_csv(pred_path, dtype=str)
+    except Exception as exc:
+        logger.warning("_fetch_and_reconcile_results: no se pudo leer predictions.csv: %s", exc)
+        return 0
+
+    # Filas sin resultado y con fecha ya jugada
+    mask = (
+        (pred_df["home_win"].isna() | (pred_df["home_win"].astype(str).str.strip().isin(["", "nan"])))
+        & (pred_df["game_date"].str[:10] < today_str)
+    )
+    needs_result = pred_df[mask]
+    if needs_result.empty:
+        logger.info("_fetch_and_reconcile_results: todas las predicciones pasadas ya tienen resultado")
+        return 0
+
+    pending_dates = sorted(needs_result["game_date"].str[:10].dropna().unique())
+    logger.info(
+        "_fetch_and_reconcile_results: %d predicciones sin resultado en %d fecha(s): %s",
+        len(needs_result), len(pending_dates), pending_dates,
+    )
+
+    # Cargar line_scores existentes
+    ls_df = pd.DataFrame()
+    if os.path.exists(ls_path):
+        try:
+            ls_df = pd.read_csv(ls_path, dtype=str)
+        except Exception:
+            ls_df = pd.DataFrame()
+
+    existing_ls_dates: set[str] = (
+        set(ls_df["fetch_date"].str[:10].dropna().unique())
+        if not ls_df.empty and "fetch_date" in ls_df.columns else set()
+    )
+
+    # Descargar line_scores para fechas que faltan
+    new_ls_frames: list = []
+    for date_str in pending_dates:
+        if date_str in existing_ls_dates:
+            continue
+        try:
+            logger.info("_fetch_and_reconcile_results: descargando line scores para %s…", date_str)
+            day_ls = get_line_scores(date_str)
+            if not day_ls.empty:
+                new_ls_frames.append(day_ls)
+                logger.info("  → %d line scores obtenidos para %s", len(day_ls), date_str)
+            else:
+                logger.info("  → sin line scores para %s (partidos sin resultado aún)", date_str)
+        except Exception as exc:
+            logger.warning("Error descargando line scores para %s: %s", date_str, exc)
+
+    # Consolidar y persistir line_scores
+    if new_ls_frames:
+        new_ls = pd.concat(new_ls_frames, ignore_index=True)
+        if not ls_df.empty:
+            ls_combined = pd.concat(
+                [ls_df, new_ls.astype(str)], ignore_index=True
+            ).drop_duplicates(subset=["game_id", "team_id"])
+        else:
+            ls_combined = new_ls.astype(str)
+        try:
+            ls_combined.to_csv(ls_path, index=False)
+            logger.info("line_scores.csv actualizado (%d filas totales)", len(ls_combined))
+        except Exception as exc:
+            logger.warning("No se pudo guardar line_scores.csv: %s", exc)
+        ls_df = ls_combined
+
+    if ls_df.empty or not {"game_id", "team_id", "pts"}.issubset(ls_df.columns):
+        logger.info("_fetch_and_reconcile_results: sin line_scores disponibles para reconciliar")
+        return 0
+
+    # Mapa game_id → home_team_id desde predictions.csv
+    home_map: dict[str, int] = {}
+    for _, row in pred_df.iterrows():
+        gid = str(row.get("game_id", "")).strip()
+        htid_raw = str(row.get("home_team_id", "")).strip()
+        if gid and htid_raw not in ("", "nan"):
+            try:
+                home_map[gid] = int(float(htid_raw))
+            except (ValueError, TypeError):
+                pass
+
+    # Calcular resultado real por partido desde line_scores
+    ls_work = ls_df.copy()
+    ls_work["pts"]     = pd.to_numeric(ls_work["pts"],     errors="coerce")
+    ls_work["team_id"] = pd.to_numeric(ls_work["team_id"], errors="coerce")
+    ls_work["game_id"] = ls_work["game_id"].astype(str).str.strip()
+
+    actual_results: dict[str, int] = {}
+    for gid, grp in ls_work.groupby("game_id"):
+        gid_str = str(gid)
+        grp = grp.dropna(subset=["pts"])
+        if len(grp) < 2:
+            continue
+        winner_tid = int(grp.loc[grp["pts"].idxmax(), "team_id"])
+        home_tid = home_map.get(gid_str)
+        if home_tid is not None:
+            actual_results[gid_str] = 1 if winner_tid == home_tid else 0
+
+    if not actual_results:
+        logger.info("_fetch_and_reconcile_results: no se pudieron determinar resultados (line_scores insuficientes)")
+        return 0
+
+    # Actualizar predictions.csv en memoria
+    updated = 0
+    for idx, row in pred_df.iterrows():
+        gid = str(row.get("game_id", "")).strip()
+        hw_raw = str(row.get("home_win", "")).strip()
+        if gid in actual_results and hw_raw in ("", "nan"):
+            pred_df.at[idx, "home_win"] = actual_results[gid]
+            updated += 1
+
+    if updated > 0:
+        try:
+            pred_df.to_csv(pred_path, index=False)
+            logger.info(
+                "_fetch_and_reconcile_results: %d predicciones actualizadas con resultado real "
+                "(%d totales en archivo)",
+                updated, len(pred_df),
+            )
+        except Exception as exc:
+            logger.warning("No se pudo guardar predictions.csv: %s", exc)
+
+        # ── Persistir en Supabase ─────────────────────────────────────────────
+        try:
+            from database.repository import DatabaseRepository
+            repo = DatabaseRepository()
+            # 1. Guardar line_scores recien descargados
+            if new_ls_frames:
+                new_ls_combined = pd.concat(new_ls_frames, ignore_index=True)
+                repo.upsert_line_scores(new_ls_combined)
+            # 2. Actualizar columna home_win en predictions
+            rows_to_update = pred_df[
+                pred_df["game_id"].astype(str).isin(actual_results)
+            ].copy()
+            if not rows_to_update.empty:
+                repo.upsert_prediction_results(rows_to_update)
+            repo.close()
+            logger.info("Supabase actualizado: %d resultados sincronizados", updated)
+        except Exception as exc:
+            logger.warning("No se pudo actualizar Supabase con resultados: %s", exc)
+
+    return updated
+
+
+# ── Snapshots de predicciones ─────────────────────────────────────────────────
+
+def _save_snapshot(date_str: str, data: dict) -> None:
+    """Persiste en disco el resultado completo del pipeline para una fecha.
+
+    Permite recuperar la predicción original aunque los datos de entrada
+    (stats, lesiones, ELO, forma reciente) cambien con el tiempo.
+    """
+    import json
+    try:
+        os.makedirs(_SNAPSHOTS_DIR, exist_ok=True)
+        path = os.path.join(_SNAPSHOTS_DIR, f"{date_str}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, default=str)
+        logger.info("Snapshot guardado: %s", path)
+    except Exception as exc:
+        logger.warning("No se pudo guardar snapshot para %s: %s", date_str, exc)
+
+
+def _load_snapshot(date_str: str) -> "dict | None":
+    """Carga desde disco el snapshot de una fecha si existe."""
+    import json
+    path = os.path.join(_SNAPSHOTS_DIR, f"{date_str}.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        logger.info("Snapshot cargado desde disco para %s", date_str)
+        return data
+    except Exception as exc:
+        logger.warning("No se pudo cargar snapshot para %s: %s", date_str, exc)
+        return None
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -547,7 +832,19 @@ def get_analysis(date: Optional[str] = Query(default=None),
                  bankroll: float = Query(default=500_000)):
     """Ejecuta el pipeline completo y devuelve el análisis del día."""
     import time
-    date_str = date or _date_cls.today().isoformat()
+    today_str = _date_cls.today().isoformat()
+    date_str  = date or today_str
+    is_past   = date_str < today_str
+
+    # Fechas pasadas: si hay snapshot en disco, devolverlo directamente.
+    # Esto preserva la predicción original con los datos del momento exacto
+    # en que se generó (lesiones, forma reciente, ELO vigentes ese día).
+    if is_past:
+        snapshot = _load_snapshot(date_str)
+        if snapshot:
+            return snapshot
+
+    # Caché en memoria (válida para el día de hoy y re-requests rápidos)
     cached = _CACHE.get(date_str)
     if cached and (time.time() - cached["ts"]) < _CACHE_TTL:
         # Aunque esté cacheado, intentar loguear (puede ser nuevo bankroll)
@@ -559,6 +856,9 @@ def get_analysis(date: Optional[str] = Query(default=None),
     try:
         data = _run_pipeline(date_str)
         _CACHE[date_str] = {"data": data, "ts": time.time()}
+        # Guardar snapshot en disco para que futuras consultas de esta fecha
+        # devuelvan siempre la predicción generada con los datos de hoy.
+        _save_snapshot(date_str, data)
         try:
             _log_bets_to_journal(data, bankroll)
         except Exception as log_exc:
@@ -571,22 +871,172 @@ def get_analysis(date: Optional[str] = Query(default=None),
 
 @app.delete("/api/cache")
 def clear_cache(date: Optional[str] = Query(default=None)):
-    """Limpia la caché para forzar re-ejecución del pipeline."""
+    """Limpia la caché (y el snapshot si existe) para forzar re-ejecución del pipeline."""
     if date:
         _CACHE.pop(date, None)
+        # Borrar también el snapshot para que el próximo request regenere
+        snapshot_path = os.path.join(_SNAPSHOTS_DIR, f"{date}.json")
+        if os.path.exists(snapshot_path):
+            try:
+                os.remove(snapshot_path)
+                logger.info("Snapshot eliminado: %s", snapshot_path)
+            except Exception as exc:
+                logger.warning("No se pudo eliminar snapshot %s: %s", snapshot_path, exc)
     else:
         _CACHE.clear()
         _ODDS_CACHE.clear()
     return {"status": "ok", "cleared": date or "all"}
 
 
+@app.get("/api/reconcile")
+def reconcile_results():
+    """
+    Dispara manualmente la reconciliación de predicciones pasadas con resultados reales.
+    Descarga line_scores faltantes, actualiza predictions.csv con home_win.
+    """
+    try:
+        updated = _fetch_and_reconcile_results()
+        return {"status": "ok", "predictions_updated": updated}
+    except Exception as exc:
+        logger.error("reconcile_results error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/accuracy")
+def get_accuracy():
+    """
+    Calcula el % de acierto real del modelo sobre predicciones con resultado conocido.
+    Lee primero desde Supabase (vista v_model_accuracy); si no está disponible, lee CSV.
+    """
+    # ── Intentar Supabase ─────────────────────────────────────────────────────
+    try:
+        from config.settings import DATABASE_URL
+        if DATABASE_URL:
+            from sqlalchemy import create_engine, text
+            eng = create_engine(DATABASE_URL, pool_pre_ping=True)
+            with eng.connect() as conn:
+                rows = conn.execute(text("SELECT * FROM v_model_accuracy")).mappings().all()
+            if rows:
+                by_model = {
+                    r["model_version"]: {
+                        "total":        r["resolved_predictions"] or 0,
+                        "correct":      None,  # la vista no guarda correct en bruto
+                        "accuracy_pct": float(r["accuracy_pct"]) if r["accuracy_pct"] else None,
+                        "avg_prob_error": float(r["avg_prob_error"]) if r["avg_prob_error"] else None,
+                    }
+                    for r in rows
+                }
+                total    = sum(v["total"] for v in by_model.values())
+                all_accs = [v["accuracy_pct"] for v in by_model.values() if v["accuracy_pct"]]
+                overall  = round(sum(all_accs) / len(all_accs), 1) if all_accs else None
+                return {
+                    "source":            "supabase",
+                    "total_with_result": total,
+                    "accuracy_pct":      overall,
+                    "by_model":          by_model,
+                }
+    except Exception as exc:
+        logger.debug("accuracy: Supabase no disponible, usando CSV: %s", exc)
+
+    # ── Fallback: CSV local ───────────────────────────────────────────────────
+    pred_path = os.path.join(_BASE_DIR, "output", "predictions.csv")
+    if not os.path.exists(pred_path):
+        return {"error": "predictions.csv no encontrado"}
+
+    try:
+        df = pd.read_csv(pred_path, dtype=str)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    has_result = df[df["home_win"].notna() & (~df["home_win"].astype(str).str.strip().isin(["", "nan"]))]
+    if has_result.empty:
+        return {
+            "total_with_result": 0,
+            "correct": 0,
+            "accuracy_pct": None,
+            "message": "Sin predicciones con resultado aun. Ejecuta /api/reconcile primero.",
+        }
+
+    results = []
+    for _, row in has_result.iterrows():
+        try:
+            hw = int(float(str(row["home_win"]).strip()))
+            pw = str(row.get("predicted_winner", "")).strip()
+            if pw not in ("home", "away"):
+                continue
+            correct = (pw == "home" and hw == 1) or (pw == "away" and hw == 0)
+            results.append({
+                "game_id":       row.get("game_id", ""),
+                "game_date":     str(row.get("game_date", ""))[:10],
+                "model_version": row.get("model_version", "?"),
+                "predicted":     pw,
+                "actual":        "home" if hw == 1 else "away",
+                "correct":       correct,
+            })
+        except (ValueError, TypeError):
+            continue
+
+    if not results:
+        return {"total_with_result": 0, "correct": 0, "accuracy_pct": None}
+
+    total   = len(results)
+    correct = sum(1 for r in results if r["correct"])
+    accuracy = round(correct / total * 100, 1)
+
+    by_model: dict = {}
+    for r in results:
+        mv = r["model_version"]
+        if mv not in by_model:
+            by_model[mv] = {"total": 0, "correct": 0}
+        by_model[mv]["total"]  += 1
+        by_model[mv]["correct"] += int(r["correct"])
+    for mv in by_model:
+        t = by_model[mv]["total"]
+        c = by_model[mv]["correct"]
+        by_model[mv]["accuracy_pct"] = round(c / t * 100, 1) if t else None
+
+    return {
+        "source":            "csv",
+        "total_with_result": total,
+        "correct":           correct,
+        "accuracy_pct":      accuracy,
+        "by_model":          by_model,
+        "detail":            results,
+    }
+
+
 @app.get("/api/backtest")
 def get_backtest(bankroll: float = Query(default=500_000)):
     """Historial real de apuestas: lee bet_journal.csv y cruza con line_scores para resultados."""
+    # Reconciliar resultados antes de construir el historial (actualiza predictions.csv y line_scores.csv)
+    try:
+        _fetch_and_reconcile_results()
+    except Exception as exc:
+        logger.warning("reconcile en backtest fallO (no critico): %s", exc)
+
     BASE         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     journal_path = os.path.join(BASE, "output", "bet_journal.csv")
     pred_path    = os.path.join(BASE, "output", "predictions.csv")
     ls_path      = os.path.join(BASE, "output", "line_scores.csv")
+
+    # ── Intentar enriquecer resultados desde Supabase (v_backtest_history) ───
+    # Si Supabase tiene datos de home_win mas actualizados que el CSV local,
+    # los usamos para resolver apuestas pendientes.
+    supabase_results: dict[str, int] = {}  # game_id -> home_win (0 o 1)
+    try:
+        from config.settings import DATABASE_URL
+        if DATABASE_URL:
+            from sqlalchemy import create_engine, text
+            eng = create_engine(DATABASE_URL, pool_pre_ping=True)
+            with eng.connect() as conn:
+                rows = conn.execute(
+                    text("SELECT game_id, actual_result FROM v_backtest_history WHERE actual_result IS NOT NULL")
+                ).mappings().all()
+            supabase_results = {r["game_id"]: int(r["actual_result"]) for r in rows}
+            if supabase_results:
+                logger.debug("backtest: %d resultados cargados desde Supabase", len(supabase_results))
+    except Exception as exc:
+        logger.debug("backtest: Supabase no disponible para resultados, usando CSV: %s", exc)
 
     # ── Cargar journal ────────────────────────────────────────────────────────
     if not os.path.exists(journal_path):
@@ -613,7 +1063,8 @@ def get_backtest(bankroll: float = Query(default=500_000)):
                 home_map[gid] = hid
 
     # ── Resultados reales ─────────────────────────────────────────────────────
-    actual_winner: dict[str, str] = {}
+    actual_winner: dict[str, str]   = {}
+    actual_totals: dict[str, float] = {}
     if os.path.exists(ls_path):
         ls_df = pd.read_csv(ls_path)
         for gid, grp in ls_df.groupby("game_id"):
@@ -622,6 +1073,11 @@ def get_backtest(bankroll: float = Query(default=500_000)):
                 continue
             winner_tid = int(grp.loc[grp["pts"].idxmax(), "team_id"])
             actual_winner[gid_str] = "home" if winner_tid == home_map.get(gid_str, -1) else "away"
+            actual_totals[gid_str] = float(grp["pts"].sum())
+
+    # Enriquecer con resultados de Supabase (tienen prioridad si estan disponibles)
+    for gid, hw in supabase_results.items():
+        actual_winner[gid] = "home" if hw == 1 else "away"
 
     # ── Construir registros desde el journal ──────────────────────────────────
     records: list[dict] = []
@@ -638,8 +1094,24 @@ def get_backtest(bankroll: float = Query(default=500_000)):
         bet_amount    = int(float(row.get("bet_amount", 0) or 0))
         pot_gain      = int(float(row.get("potential_gain", 0) or 0))
         model_prob_pct = float(row.get("model_prob_pct", 50) or 50)
+        bet_type      = str(row.get("bet_type", "") or "moneyline")
+        tl_raw        = row.get("total_line")
+        total_line: Optional[float] = None
+        try:
+            if pd.notna(tl_raw) and str(tl_raw).strip():
+                total_line = float(tl_raw)
+        except (ValueError, TypeError):
+            pass
 
-        actual = actual_winner.get(gid)        # None si aún no hay resultado
+        if bet_type == "total" and total_line is not None:
+            actual_total = actual_totals.get(gid)
+            if actual_total is not None:
+                actual = "over" if actual_total > total_line else ("under" if actual_total < total_line else None)
+            else:
+                actual = None
+        else:
+            actual = actual_winner.get(gid)   # None si aún no hay resultado
+
         if actual is not None:
             correct = (predicted == actual)
             pl      = pot_gain if correct else -bet_amount
@@ -666,6 +1138,8 @@ def get_backtest(bankroll: float = Query(default=500_000)):
             "bet_amount":     bet_amount,
             "potential_gain": pot_gain,
             "pl":             pl,
+            "bet_type":       bet_type,
+            "total_line":     total_line,
         })
 
     records.sort(key=lambda x: (x["game_date"], x["game_id"]))

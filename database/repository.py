@@ -25,7 +25,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from config.settings import DATABASE_URL
-from database.models import Base, Game, Odd, Prediction, Team, TeamStat, ValueBet
+from database.models import Base, Game, LineScore, Odd, Prediction, Team, TeamStat, ValueBet
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -45,14 +45,79 @@ class DatabaseRepository:
 
     # ── Infraestructura ───────────────────────────────────────────────────────
 
+    # SQL de migración/vistas — se aplica en cada inicio (todo usa IF NOT EXISTS / CREATE OR REPLACE)
+    _SETUP_SQL = [
+        # ── Columna home_win en tabla existente ─────────────────────────────
+        "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS home_win INTEGER",
+
+        # ── Vista de accuracy por modelo ─────────────────────────────────────
+        """
+        CREATE OR REPLACE VIEW v_model_accuracy AS
+        SELECT
+            model_version,
+            COUNT(*)                                                            AS total_games,
+            COUNT(*) FILTER (WHERE home_win IS NOT NULL)                        AS total_with_result,
+            ROUND(
+                AVG(CASE
+                    WHEN home_win IS NOT NULL
+                         AND ((predicted_winner = 'home' AND home_win = 1)
+                           OR (predicted_winner = 'away' AND home_win = 0))
+                    THEN 1.0 ELSE 0.0
+                END) * 100, 2
+            )                                                                   AS accuracy_pct,
+            COUNT(*) FILTER (WHERE
+                home_win IS NOT NULL
+                AND ((predicted_winner = 'home' AND home_win = 1)
+                  OR (predicted_winner = 'away' AND home_win = 0))
+            )                                                                   AS correct
+        FROM predictions
+        WHERE model_version IS NOT NULL
+        GROUP BY model_version
+        ORDER BY model_version
+        """,
+
+        # ── Vista de historial por partido ───────────────────────────────────
+        """
+        CREATE OR REPLACE VIEW v_backtest_history AS
+        SELECT
+            p.game_id,
+            p.game_date,
+            p.home_team,
+            p.away_team,
+            p.predicted_winner,
+            p.home_win_prob,
+            p.away_win_prob,
+            p.home_win,
+            p.model_version,
+            CASE
+                WHEN p.home_win IS NULL THEN 'pending'
+                WHEN (p.predicted_winner = 'home' AND p.home_win = 1)
+                  OR (p.predicted_winner = 'away' AND p.home_win = 0) THEN 'correct'
+                ELSE 'incorrect'
+            END                                                                 AS result
+        FROM predictions p
+        ORDER BY p.game_date DESC
+        """,
+    ]
+
     def _create_tables(self) -> None:
-        """Crea todas las tablas definidas en models.py si no existen."""
+        """Crea todas las tablas definidas en models.py y aplica migraciones/vistas."""
         try:
             Base.metadata.create_all(self.engine)
             logger.info("Esquema de base de datos verificado/creado")
         except Exception as exc:
             logger.error("Error al crear tablas: %s", exc, exc_info=True)
             raise
+        # Aplicar migraciones idempotentes
+        try:
+            with self.engine.connect() as conn:
+                for stmt in self._SETUP_SQL:
+                    conn.execute(text(stmt.strip()))
+                conn.commit()
+            logger.info("Migraciones y vistas Supabase aplicadas correctamente")
+        except Exception as exc:
+            # No es fatal — puede fallar si el driver no soporta DDL o no hay permisos
+            logger.warning("No se pudieron aplicar migraciones automáticas: %s", exc)
 
     def get_session(self) -> Session:
         return self._SessionFactory()
@@ -290,6 +355,7 @@ class DatabaseRepository:
                 "home_win_prob":    float(row["home_win_prob"]),
                 "away_win_prob":    float(row["away_win_prob"]),
                 "predicted_winner": str(row.get("predicted_winner", "")),
+                "home_win":         int(row["home_win"]) if row.get("home_win") is not None and str(row.get("home_win")) not in ("", "nan") else None,
                 "model_version":    str(row.get("model_version", "v1")),
                 "fetch_date":       self._to_date(row.get("fetch_date")),
             })
@@ -298,11 +364,55 @@ class DatabaseRepository:
             count = self._upsert(
                 session, Prediction, rows,
                 constraint_name="uq_prediction_game_model",
-                update_cols=["home_win_prob", "away_win_prob", "predicted_winner", "fetch_date"],
+                update_cols=["home_win_prob", "away_win_prob", "predicted_winner", "home_win", "fetch_date"],
             )
             session.commit()
 
         logger.info("upsert_predictions: %d predicciones procesadas", count)
+        return count
+
+    def upsert_prediction_results(self, df: pd.DataFrame) -> int:
+        """
+        Actualiza SOLO la columna home_win de predicciones existentes una vez
+        se conoce el resultado real. Clave: game_id + model_version.
+
+        Args:
+            df: DataFrame con columnas game_id, model_version, home_win.
+        """
+        if df.empty:
+            logger.warning("upsert_prediction_results: DataFrame vacio, sin operacion")
+            return 0
+
+        rows = []
+        for _, row in df.iterrows():
+            hw = row.get("home_win")
+            if hw is None or str(hw) in ("", "nan"):
+                continue
+            rows.append({
+                "game_id":          str(row.get("game_id", "")),
+                "game_date":        self._to_date(row.get("game_date")),
+                "home_team_id":     int(row["home_team_id"])    if row.get("home_team_id")    is not None else None,
+                "visitor_team_id":  int(row["visitor_team_id"]) if row.get("visitor_team_id") is not None else None,
+                "home_win_prob":    float(row.get("home_win_prob", 0.5)),
+                "away_win_prob":    float(row.get("away_win_prob", 0.5)),
+                "predicted_winner": str(row.get("predicted_winner", "")),
+                "home_win":         int(hw),
+                "model_version":    str(row.get("model_version", "v1")),
+                "fetch_date":       self._to_date(row.get("fetch_date")),
+            })
+
+        if not rows:
+            return 0
+
+        with self.get_session() as session:
+            count = self._upsert(
+                session, Prediction, rows,
+                constraint_name="uq_prediction_game_model",
+                update_cols=["home_win"],
+            )
+            session.commit()
+
+        logger.info("upsert_prediction_results: %d resultados actualizados", count)
         return count
 
     # ── ValueBets ─────────────────────────────────────────────────────────────
@@ -337,4 +447,41 @@ class DatabaseRepository:
             session.commit()
 
         logger.info("upsert_value_bets: %d value bets procesadas", count)
+        return count
+
+    # ── LineScores ────────────────────────────────────────────────────────────
+
+    def upsert_line_scores(self, df: pd.DataFrame) -> int:
+        """
+        Inserta o actualiza marcadores por equipo por partido.
+        Clave unica: game_id + team_id.
+
+        Args:
+            df: DataFrame con columnas game_id, team_id, pts y opcionalmente
+                game_date, fetch_date.
+        """
+        if df.empty:
+            logger.warning("upsert_line_scores: DataFrame vacio, sin operacion")
+            return 0
+
+        rows = []
+        for _, row in df.iterrows():
+            pts_val = row.get("pts")
+            rows.append({
+                "game_id":   str(row.get("game_id", "")),
+                "game_date": self._to_date(row.get("game_date")),
+                "team_id":   int(row["team_id"]) if row.get("team_id") is not None else None,
+                "pts":       int(pts_val) if pts_val is not None and str(pts_val) not in ("", "nan") else None,
+                "fetch_date": self._to_date(row.get("fetch_date")),
+            })
+
+        with self.get_session() as session:
+            count = self._upsert(
+                session, LineScore, rows,
+                constraint_name="uq_line_score_game_team",
+                update_cols=["pts", "game_date", "fetch_date"],
+            )
+            session.commit()
+
+        logger.info("upsert_line_scores: %d marcadores procesados", count)
         return count

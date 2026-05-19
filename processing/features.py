@@ -369,6 +369,8 @@ def get_feature_columns() -> list[str]:
         "pace_diff",           # ritmo de juego diferencial
         "ts_pct_diff",         # True Shooting % diferencial
         "efg_pct_diff",        # Effective FG% diferencial
+        # -- Lesiones -- impacto de estrellas ausentes (>0 = ventaja local)
+        "injury_impact_diff",  # visitor_ppg_lost - home_ppg_lost
     ]
 
 

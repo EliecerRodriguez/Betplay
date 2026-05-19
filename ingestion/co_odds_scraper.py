@@ -28,7 +28,8 @@ logger = get_logger(__name__)
 # -- Configuracion Kambi API --------------------------------------------------
 _KAMBI_BASE     = "https://us.offering-api.kambicdn.com/offering/v2018"
 _NBA_GROUP_ID   = 1000093652   # mismo ID en betplay y rsico
-_MATCH_OFFER_ID = 2            # betOfferType.id == 2 -> "Match" (h2h)
+_MATCH_OFFER_ID      = 2   # betOfferType.id == 2 -> "Match" (h2h)
+_OVER_UNDER_OFFER_ID = 6   # betOfferType.id == 6 -> "Over/Under" (totales de puntos)
 _HTTP_TIMEOUT   = 15           # segundos
 
 _KAMBI_OPERATORS: dict[str, dict] = {
@@ -214,6 +215,49 @@ def _fetch_kambi_nba(bookmaker_name: str, operator: str, lang: str, market: str)
             elif team == away_team:
                 away_odds = round(decimal_odds, 2)
 
+        # ── 4. Oferta Over/Under (totales de puntos) ─────────────────────────
+        over_line:  Optional[float] = None
+        over_odds:  Optional[float] = None
+        under_odds: Optional[float] = None
+
+        ou_offers = [
+            o for o in offers
+            if o.get("betOfferType", {}).get("id") == _OVER_UNDER_OFFER_ID
+            and o.get("criterion", {}).get("label", "").lower().startswith("total de puntos")
+            and "pr\u00f3rroga" in o.get("criterion", {}).get("label", "").lower()  # solo partido completo (incluye prórroga)
+            and "del " not in o.get("criterion", {}).get("label", "").lower()        # excluye totales individuales por equipo
+            and "mitad" not in o.get("criterion", {}).get("label", "").lower()       # excluye segunda mitad
+            and "parte" not in o.get("criterion", {}).get("label", "").lower()       # excluye primera/segunda parte
+        ]
+
+        if ou_offers:
+            # Seleccionar la línea más equilibrada (odds más cercanas entre sí)
+            best_ou: Optional[dict] = None
+            best_balance = float("inf")
+            for offer in ou_offers:
+                o_raw = u_raw = None
+                for oc in offer.get("outcomes", []):
+                    if oc.get("status") == "SUSPENDED" or oc.get("odds") is None:
+                        continue
+                    if oc.get("type") == "OT_OVER":
+                        o_raw = oc["odds"]
+                    elif oc.get("type") == "OT_UNDER":
+                        u_raw = oc["odds"]
+                if o_raw and u_raw:
+                    balance = abs(o_raw - u_raw)
+                    if balance < best_balance:
+                        best_balance = balance
+                        best_ou = {"offer": offer, "o_raw": o_raw, "u_raw": u_raw}
+
+            if best_ou:
+                for oc in best_ou["offer"].get("outcomes", []):
+                    if oc.get("type") == "OT_OVER":
+                        raw_line = oc.get("line", 0)
+                        over_line = round(raw_line / 1000.0, 1)
+                        break
+                over_odds  = round(best_ou["o_raw"] / 1000.0, 2)
+                under_odds = round(best_ou["u_raw"] / 1000.0, 2)
+
         if home_odds is not None and away_odds is not None:
             records.append({
                 "home_team":   home_team,
@@ -221,12 +265,16 @@ def _fetch_kambi_nba(bookmaker_name: str, operator: str, lang: str, market: str)
                 "bookmaker":   bookmaker_name,
                 "home_odds":   home_odds,
                 "away_odds":   away_odds,
+                "over_line":   over_line,
+                "over_odds":   over_odds,
+                "under_odds":  under_odds,
                 "fetch_date":  today,
                 "event_start": ev.get("start", ""),
             })
             logger.debug(
-                "%s: %s (%.2f) vs %s (%.2f)",
+                "%s: %s (%.2f) vs %s (%.2f) | O/U %.1f (%.2f/%.2f)",
                 bookmaker_name, home_team, home_odds, away_team, away_odds,
+                over_line or 0.0, over_odds or 0.0, under_odds or 0.0,
             )
 
     logger.info("%s: %d partidos con cuotas h2h validas", bookmaker_name, len(records))
@@ -404,7 +452,8 @@ def get_co_odds(games_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     if games_df is not None and not games_df.empty:
         df = _attach_game_ids(df, games_df)
 
-    cols_order = ["game_id", "home_team", "away_team", "bookmaker", "home_odds", "away_odds", "fetch_date"]
+    cols_order = ["game_id", "home_team", "away_team", "bookmaker",
+                  "home_odds", "away_odds", "over_line", "over_odds", "under_odds", "fetch_date"]
     existing = [c for c in cols_order if c in df.columns]
     df = df[existing]
 
