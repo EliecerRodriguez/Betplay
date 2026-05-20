@@ -271,7 +271,7 @@
     .bt-day-br { font-size:12px; color:var(--text3); font-variant-numeric:tabular-nums; }
     .bt-bets-list { padding:0 12px 12px; display:none; flex-direction:column; gap:6px; }
     .bt-bets-list.open { display:flex; }
-    .bt-bet-row { display:grid; grid-template-columns:1fr 90px 52px 54px 88px; gap:8px; align-items:center; padding:9px 12px; border-radius:8px; border:1px solid var(--border); background:var(--bg-card); border-left-width:3px; }
+    .bt-bet-row { display:grid; grid-template-columns:1fr 90px 52px 54px 88px 28px; gap:8px; align-items:center; padding:9px 12px; border-radius:8px; border:1px solid var(--border); background:var(--bg-card); border-left-width:3px; }
     .bt-bet-row.win { border-left-color:var(--green); } .bt-bet-row.loss { border-left-color:var(--red); }
     .bt-bet-game { font-size:12px; font-weight:600; line-height:1.4; }
     .bt-bet-sub { font-size:10px; color:var(--text3); }
@@ -280,6 +280,8 @@
     .bt-bet-result.ok { color:var(--green); } .bt-bet-result.ko { color:var(--red); }
     .bt-bet-mv { text-align:center; }
     .bt-bet-odds { font-size:12px; color:var(--text2); text-align:center; }
+    .bt-del-btn { background:none; border:none; cursor:pointer; color:var(--text3); font-size:14px; padding:2px 4px; border-radius:4px; line-height:1; transition:color .15s,background .15s; }
+    .bt-del-btn:hover { color:var(--red); background:rgba(255,82,82,.1); }
     .bt-bet-pl-val { font-size:13px; font-weight:800; text-align:right; }
     .bt-bet-pl-val.pos { color:var(--green); } .bt-bet-pl-val.neg { color:var(--red); }
   </style>
@@ -300,7 +302,7 @@
       <input type="number" id="bankrollInput" class="bankroll-input" placeholder="500000" min="1000" step="10000">
     </div>
     <button class="btn" id="btnRefresh" onclick="refresh()">⟳ Actualizar</button>
-    <button class="btn" id="btnResults" onclick="openResults()" style="background:var(--bg-card2);border:1px solid var(--border);color:var(--text);display:var(--nba-only,inline-flex)">📊 Resultados</button>
+    <button class="btn" id="btnResults" onclick="openResults()" style="background:var(--bg-card2);border:1px solid var(--border);color:var(--text)">📊 Resultados</button>
   </div>
 </header>
 
@@ -324,7 +326,7 @@
 <div id="resultsModal" class="modal-overlay" onclick="if(event.target===this)closeResults()" style="display:none">
   <div class="modal-box">
     <div class="modal-hdr">
-      <h2>📊 Resultados de Predicciones</h2>
+      <h2 id="resultsModalTitle">📊 Resultados de Predicciones</h2>
       <button class="modal-close-btn" onclick="closeResults()">✕</button>
     </div>
     <div class="modal-body" id="resultsBody">
@@ -346,7 +348,6 @@ function switchSport(sport) {
   document.getElementById('tabAtp').className = 'sport-tab' + (sport==='atp' ? ' active' : '');
   document.getElementById('nbaSections').style.display = sport==='nba' ? '' : 'none';
   document.getElementById('atpSections').style.display = sport==='atp' ? '' : 'none';
-  document.getElementById('btnResults').style.display  = sport==='nba' ? '' : 'none';
   const date = document.getElementById('datePicker').value;
   if (sport === 'atp' && !STATE.atpData) loadATP(date);
 }
@@ -864,8 +865,11 @@ function showError(msg, sport) {
 
 // ── Modal Resultados ─────────────────────────────────────────────────────────
 function openResults() {
+  const sport = STATE.sport;
+  const title = document.getElementById('resultsModalTitle');
+  if (title) title.textContent = sport === 'atp' ? '🎾 Resultados ATP' : '📊 Resultados NBA';
   document.getElementById('resultsModal').style.display = 'flex';
-  loadBacktest();
+  if (sport === 'atp') loadAtpBacktest(); else loadBacktest();
 }
 function closeResults() {
   document.getElementById('resultsModal').style.display = 'none';
@@ -881,6 +885,117 @@ async function loadBacktest() {
   } catch(e) {
     document.getElementById('resultsBody').innerHTML = `<div class="error-wrap">⚠ ${e.message}</div>`;
   }
+}
+
+async function loadAtpBacktest() {
+  document.getElementById('resultsBody').innerHTML = '<div class="loading-wrap"><div class="spinner"></div><p>Calculando resultados ATP…<br><small style="color:var(--text3)">Cruzando con dataset real de Sackmann</small></p></div>';
+  try {
+    const br = STATE.bankroll || 500000;
+    const r  = await fetch(`/api/atp/backtest?bankroll=${br}`);
+    if (!r.ok) throw new Error(await r.text());
+    renderAtpBacktest(await r.json());
+  } catch(e) {
+    document.getElementById('resultsBody').innerHTML = `<div class="error-wrap">⚠ ${e.message}</div>`;
+  }
+}
+
+function renderAtpBacktest(d) {
+  if (d.empty) {
+    document.getElementById('resultsBody').innerHTML = `
+      <div style="text-align:center;padding:60px 20px;color:var(--text3)">
+        <div style="font-size:48px;margin-bottom:16px">🎾</div>
+        <div style="font-size:15px;font-weight:600;margin-bottom:8px">Sin historial ATP aún</div>
+        <div style="font-size:13px">Consulta el análisis ATP para registrar las primeras apuestas.<br>Al día siguiente se cruzarán automáticamente con los resultados reales.</div>
+      </div>`;
+    return;
+  }
+
+  const sign    = n => n >= 0 ? '+' : '';
+  const prof    = d.total_profit;
+  const profCls = prof >= 0 ? 'bc-green' : 'bc-red';
+  const pendTxt = d.pending_count > 0
+    ? `<span style="color:var(--accent);font-size:12px;font-weight:600;">⏳ ${d.pending_count} pendiente${d.pending_count!==1?'s':''}</span>`
+    : '';
+
+  const summary = `
+    <div class="bt-summary">
+      <div class="bt-card bc-blue"><div class="bc-label">Bankroll Actual</div><div class="bc-val">${fmt(d.current_bankroll)}</div></div>
+      <div class="bt-card ${profCls}"><div class="bc-label">Ganancia / Pérdida</div><div class="bc-val">${sign(prof)}${fmt(prof)}</div></div>
+      <div class="bt-card ${d.roi>=0?'bc-green':'bc-red'}"><div class="bc-label">ROI</div><div class="bc-val">${sign(d.roi)}${d.roi}%</div></div>
+      <div class="bt-card bc-orange"><div class="bc-label">% Aciertos</div><div class="bc-val">${d.win_rate}%</div></div>
+      <div class="bt-card"><div class="bc-label">Apuestas (G/P) ${pendTxt}</div><div class="bc-val" style="color:var(--text);font-size:18px">${d.total_wins}W&nbsp;/&nbsp;${d.total_losses}L</div></div>
+      <div class="bt-card"><div class="bc-label">Estrategia</div><div class="bc-val" style="color:var(--purple);font-size:16px">${d.strategy}</div></div>
+    </div>`;
+
+  const chart = buildBtChart(d.sparkline, d.initial_bankroll);
+
+  const mvRows = Object.entries(d.models).sort((a,b)=>a[0].localeCompare(b[0])).map(([mv,ms])=>{
+    const pc = ms.pl>=0?'style="color:var(--green)"':'style="color:var(--red)"';
+    const rc = ms.roi>=0?'style="color:var(--green)"':'style="color:var(--red)"';
+    return `<tr><td><span class="mv-chip">${mv}</span></td><td>${ms.bets}</td>
+      <td style="color:var(--green)">${ms.wins}</td><td style="color:var(--red)">${ms.losses}</td>
+      <td>${ms.win_rate}%</td><td ${pc}>${sign(ms.pl)}${fmt(ms.pl)}</td><td ${rc}>${sign(ms.roi)}${ms.roi}%</td></tr>`;
+  }).join('');
+
+  const models = `
+    <div class="bt-models-wrap">
+      <div class="bt-sec-hdr">Rendimiento por versión de modelo ATP</div>
+      <table class="bt-table">
+        <thead><tr><th>Modelo</th><th>Apuestas</th><th>Ganadas</th><th>Perdidas</th><th>Acierto</th><th>P&amp;L</th><th>ROI</th></tr></thead>
+        <tbody>${mvRows}</tbody>
+      </table>
+    </div>`;
+
+  const dailyHtml = [...d.daily].reverse().map((day, i) => {
+    const plCls  = day.day_pl>0?'pos':day.day_pl<0?'neg':'';
+    const plDisp = day.has_pending && day.day_pl===0 ? ''
+      : `<span class="bt-day-pl ${plCls}">${sign(day.day_pl)}${fmt(day.day_pl)}</span>`;
+    const dLabel = new Date(day.date+'T12:00:00').toLocaleDateString('es-CO',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
+
+    const betsHtml = day.bets.map(b => {
+      const delAtp = `<button class="bt-del-btn" title="Eliminar apuesta" onclick="deleteAtpBet('${b.match_id}','${b.predicted.replace(/'/g,"\\'")}','${b.bookmaker}')">&#10005;</button>`;
+      if (b.status === 'pending') {
+        return `
+          <div class="bt-bet-row pending">
+            <div>
+              <div class="bt-bet-game">${b.predicted} vs ${b.opponent} <span style="font-size:10px;color:var(--text3)">${b.tourney_name} · ${b.surface}</span></div>
+              <div class="bt-bet-sub">▶ Apuesta a: <strong>${b.predicted}</strong> (${b.model_prob_pct}%) · ${b.bookmaker} @ ${b.odds} · Kelly ${b.kelly_pct}% · Apostar: ${fmt(b.bet_amount)} &nbsp;·&nbsp; Ganancia si gana: +${fmt(b.potential_gain)}</div>
+            </div>
+            <div class="bt-bet-result" style="color:var(--accent)">⏳ PENDIENTE</div>
+            <div class="bt-bet-mv"><span class="mv-chip">${b.model}</span></div>
+            <div class="bt-bet-odds">×${b.odds}</div>
+            <div class="bt-bet-pl-val" style="color:var(--text3)">?</div>
+            ${delAtp}
+          </div>`;
+      }
+      return `
+        <div class="bt-bet-row ${b.correct?'win':'loss'}">
+          <div>
+            <div class="bt-bet-game">${b.predicted} vs ${b.opponent} <span style="font-size:10px;color:var(--text3)">${b.tourney_name} · ${b.surface}</span></div>
+            <div class="bt-bet-sub">▶ Apostado a: <strong>${b.predicted}</strong> (${b.model_prob_pct}%) · ${b.bookmaker} @ ${b.odds} · Kelly ${b.kelly_pct}% · Apostado: ${fmt(b.bet_amount)} &nbsp;·&nbsp; ${b.correct?'Ganancia: +'+fmt(b.potential_gain):'Pérdida: -'+fmt(b.bet_amount)}</div>
+          </div>
+          <div class="bt-bet-result ${b.correct?'ok':'ko'}">${b.correct?'✓ GANÓ':'✗ PERDIÓ'}<br><span style="font-size:10px;font-weight:400">${b.actual||'?'}</span></div>
+          <div class="bt-bet-mv"><span class="mv-chip">${b.model}</span></div>
+          <div class="bt-bet-odds">×${b.odds}</div>
+          <div class="bt-bet-pl-val ${b.pl>=0?'pos':'neg'}">${sign(b.pl)}${fmt(b.pl)}</div>
+          ${delAtp}
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="bt-day">
+        <div class="bt-day-head" onclick="toggleBtDay(${i})">
+          <div class="bt-day-date">${dLabel} ${day.has_pending?'<span style="color:var(--accent)">⏳</span>':''}</div>
+          <div class="bt-day-meta"><span class="bt-day-cnt">${day.bets.length} apuesta${day.bets.length!==1?'s':''}</span>${plDisp}<span class="bt-day-br">${fmt(day.running_bankroll)}</span></div>
+        </div>
+        <div class="bt-bets-list" id="btday-${i}">${betsHtml}</div>
+      </div>`;
+  }).join('');
+
+  document.getElementById('resultsBody').innerHTML =
+    summary + chart + models +
+    `<div class="bt-sec-hdr" style="margin-top:24px">Historial diario de apuestas ATP</div>` +
+    `<div id="btDailyList">${dailyHtml}</div>`;
 }
 
 function renderBacktest(d) {
@@ -946,6 +1061,7 @@ function renderBacktest(d) {
     const betsHtml = day.bets.map(b => {
       const predTeam = b.predicted === 'home' ? b.home_team : b.away_team;
       const predProb = b.model_prob_pct || (b.predicted === 'home' ? b.home_prob : b.away_prob);
+      const delNba = `<button class="bt-del-btn" title="Eliminar apuesta" onclick="deleteNbaBet('${b.game_id}','${b.predicted}','${b.bet_type}')">&#10005;</button>`;
       if (b.status === 'pending') {
         return `
           <div class="bt-bet-row pending">
@@ -957,6 +1073,7 @@ function renderBacktest(d) {
             <div class="bt-bet-mv"><span class="mv-chip">${b.model}</span></div>
             <div class="bt-bet-odds">×${b.odds}</div>
             <div class="bt-bet-pl-val" style="color:var(--text3)">?</div>
+            ${delNba}
           </div>`;
       }
       const actualTeam = (b.bet_type === 'total')
@@ -973,6 +1090,7 @@ function renderBacktest(d) {
           <div class="bt-bet-mv"><span class="mv-chip">${b.model}</span></div>
           <div class="bt-bet-odds">×${b.odds}</div>
           <div class="bt-bet-pl-val ${b.pl >= 0 ? 'pos' : 'neg'}">${sign(b.pl)}${fmt(b.pl)}</div>
+          ${delNba}
         </div>`;
     }).join('');
     return `
@@ -992,6 +1110,22 @@ function renderBacktest(d) {
   document.getElementById('resultsBody').innerHTML =
     summary + chart + models +
     `<div class="bt-daily-wrap"><div class="bt-sec-hdr">Historial diario (más reciente primero)</div>${dailyHtml}</div>`;
+}
+
+async function deleteAtpBet(matchId, predictedPlayer, bookmaker) {
+  if (!confirm(`¿Eliminar esta apuesta del historial ATP?\n${predictedPlayer} · ${bookmaker}`)) return;
+  const params = new URLSearchParams({ match_id: matchId, predicted_player: predictedPlayer, bookmaker });
+  const r = await fetch(`/api/atp/journal/bet?${params}`, { method: 'DELETE' });
+  if (!r.ok) { alert('Error al eliminar: ' + await r.text()); return; }
+  loadAtpBacktest();
+}
+
+async function deleteNbaBet(gameId, predictedSide, betType) {
+  if (!confirm(`¿Eliminar esta apuesta del historial NBA?\n${gameId} · ${betType}`)) return;
+  const params = new URLSearchParams({ game_id: gameId, predicted_side: predictedSide, bet_type: betType });
+  const r = await fetch(`/api/journal/bet?${params}`, { method: 'DELETE' });
+  if (!r.ok) { alert('Error al eliminar: ' + await r.text()); return; }
+  loadBacktest();
 }
 
 function toggleBtDay(i) {
