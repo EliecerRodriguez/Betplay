@@ -105,7 +105,7 @@ def run_backtest(
     Returns:
         BacktestResult con todas las métricas.
     """
-    from model.predictor import predict as model_predict, load_model
+    from sports.nba.model.predictor import predict as model_predict, load_model
 
     if "home_win" not in feature_df.columns:
         raise ValueError("feature_df debe tener columna 'home_win' con resultados reales")
@@ -292,8 +292,8 @@ def _cli() -> int:
     args = parser.parse_args()
 
     from config.settings import NBA_SEASON
-    from ingestion.nba_client import get_team_stats
-    from processing.features import build_features, clean_team_stats
+    from sports.nba.ingestion.nba_client import get_team_stats
+    from sports.nba.processing.features import build_features, clean_team_stats
 
     season = args.season or NBA_SEASON
     start  = datetime.strptime(args.start_date, "%Y-%m-%d").date()
@@ -312,7 +312,7 @@ def _cli() -> int:
     stats_df = clean_team_stats(stats_df)
 
     if args.with_form:
-        from ingestion.recent_form import enrich_with_form
+        from sports.nba.ingestion.recent_form import enrich_with_form
         if "game_date" not in games_df.columns and "game_date_est" in games_df.columns:
             games_df["game_date"] = pd.to_datetime(games_df["game_date_est"]).dt.date
         logger.info("Enriqueciendo con forma reciente…")

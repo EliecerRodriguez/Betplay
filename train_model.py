@@ -36,10 +36,10 @@ from typing import List, Optional
 import pandas as pd
 
 from config.settings import NBA_API_DELAY, NBA_SEASON
-from ingestion.injuries_client import get_historical_injury_proxy
-from ingestion.nba_client import get_daily_games, get_line_scores, get_team_stats, get_combined_team_stats
-from model.predictor import train
-from processing.features import (
+from sports.nba.ingestion.injuries_client import get_historical_injury_proxy
+from sports.nba.ingestion.nba_client import get_daily_games, get_line_scores, get_team_stats, get_combined_team_stats
+from sports.nba.model.predictor import train
+from sports.nba.processing.features import (
     build_features,
     clean_games,
     clean_team_stats,
@@ -373,7 +373,7 @@ def build_training_data(
     if enrich_form and seasons:
         logger.info("Enriqueciendo con forma reciente (puede tardar varios minutos)…")
         try:
-            from ingestion.recent_form import enrich_with_form
+            from sports.nba.ingestion.recent_form import enrich_with_form
             if "game_date" not in games_df.columns and "game_date_est" in games_df.columns:
                 games_df["game_date"] = pd.to_datetime(games_df["game_date_est"]).dt.date
             games_df = enrich_with_form(games_df, season=seasons[-1], n=5)
@@ -383,7 +383,7 @@ def build_training_data(
     if enrich_travel and seasons:
         logger.info("Enriqueciendo con datos de viaje y jet lag…")
         try:
-            from ingestion.travel_client import enrich_with_travel
+            from sports.nba.ingestion.travel_client import enrich_with_travel
             if "game_date" not in games_df.columns and "game_date_est" in games_df.columns:
                 games_df["game_date"] = pd.to_datetime(games_df["game_date_est"]).dt.date
             games_df = enrich_with_travel(games_df, season=seasons[-1])
@@ -391,7 +391,7 @@ def build_training_data(
             logger.warning("enrich_with_travel falló (%s) — se entrena sin features de viaje", exc)
     # Enriquecer con Elo (procesa partidos en orden cronol\u00f3gico)
     try:
-        from ingestion.elo import enrich_with_elo, get_current_elos, save_current_elos
+        from sports.nba.ingestion.elo import enrich_with_elo, get_current_elos, save_current_elos
         if "game_date" not in games_df.columns and "game_date_est" in games_df.columns:
             games_df["game_date"] = pd.to_datetime(games_df["game_date_est"]).dt.date
         games_df = enrich_with_elo(games_df)
@@ -520,7 +520,7 @@ def build_training_data(
     )
     # Guardar Elo actuales para uso en producci\u00f3n (web app)
     try:
-        from ingestion.elo import get_current_elos, save_current_elos
+        from sports.nba.ingestion.elo import get_current_elos, save_current_elos
         current_elos = get_current_elos(games_df)
         save_current_elos(current_elos)
     except Exception as exc:

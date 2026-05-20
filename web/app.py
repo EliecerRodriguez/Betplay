@@ -24,14 +24,14 @@ from fastapi.staticfiles import StaticFiles
 from nba_api.stats.static import teams as nba_teams_static
 
 from config.settings import NBA_SEASON
-from ingestion.elo import apply_elos_to_games, load_current_elos
-from ingestion.injuries_client import adjust_predictions, get_injuries_summary_for_game
-from ingestion.nba_client import get_combined_team_stats, get_daily_games, get_line_scores, get_team_stats
-from ingestion.odds_client import get_odds
-from ingestion.recent_form import enrich_with_form
-from model.predictor import predict
-from model.value_detector import detect_value_bets
-from processing.features import build_features
+from sports.nba.ingestion.elo import apply_elos_to_games, load_current_elos
+from sports.nba.ingestion.injuries_client import adjust_predictions, get_injuries_summary_for_game
+from sports.nba.ingestion.nba_client import get_combined_team_stats, get_daily_games, get_line_scores, get_team_stats
+from sports.nba.ingestion.odds_client import get_odds
+from sports.nba.ingestion.recent_form import enrich_with_form
+from sports.nba.model.predictor import predict
+from sports.nba.model.value_detector import detect_value_bets
+from sports.nba.processing.features import build_features
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -85,7 +85,7 @@ def _get_repo():
     if not DATABASE_URL or "localhost" in DATABASE_URL:
         return None
     try:
-        from database.repository import DatabaseRepository
+        from sports.nba.database.repository import DatabaseRepository
         _repo = DatabaseRepository(DATABASE_URL)
         logger.info("Repositorio BD conectado a Supabase")
     except Exception as exc:
@@ -331,7 +331,7 @@ def _run_pipeline(date_str: str) -> dict:
     # 3c. Monte Carlo — enriquece predicciones con mc_total (necesario para O/U)
     if not predictions_df.empty:
         try:
-            from model.monte_carlo import enrich_predictions_with_mc
+            from sports.nba.model.monte_carlo import enrich_predictions_with_mc
             predictions_df = enrich_predictions_with_mc(predictions_df, feature_df)
         except Exception as exc:
             logger.warning("Monte Carlo falló: %s — sin mc_total para O/U", exc)
@@ -647,6 +647,11 @@ def _fetch_and_reconcile_results() -> int:
         return 0
 
     # Filas sin resultado y con fecha ya jugada
+    if "home_win" not in pred_df.columns:
+        pred_df["home_win"] = pd.NA
+    if "game_date" not in pred_df.columns:
+        logger.warning("_fetch_and_reconcile_results: predictions.csv no tiene columna 'game_date'")
+        return 0
     mask = (
         (pred_df["home_win"].isna() | (pred_df["home_win"].astype(str).str.strip().isin(["", "nan"])))
         & (pred_df["game_date"].str[:10] < today_str)
@@ -765,7 +770,7 @@ def _fetch_and_reconcile_results() -> int:
 
         # ── Persistir en Supabase ─────────────────────────────────────────────
         try:
-            from database.repository import DatabaseRepository
+            from sports.nba.database.repository import DatabaseRepository
             repo = DatabaseRepository()
             # 1. Guardar line_scores recien descargados
             if new_ls_frames:

@@ -20,16 +20,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pandas as pd
 
 from config.settings import NBA_SEASON
-from ingestion.elo import apply_elos_to_games, load_current_elos
-from ingestion.injuries_client import adjust_predictions, get_team_injury_impact
-from ingestion.nba_client import get_daily_games, get_combined_team_stats, get_line_scores
-from ingestion.odds_client import get_odds
-from ingestion.recent_form import enrich_with_form
-from ingestion.travel_client import enrich_with_travel
-from model.monte_carlo import enrich_predictions_with_mc
-from model.predictor import predict
-from model.value_detector import detect_value_bets
-from processing.features import build_features, clean_team_stats
+from sports.nba.ingestion.elo import apply_elos_to_games, load_current_elos
+from sports.nba.ingestion.injuries_client import adjust_predictions, get_team_injury_impact
+from sports.nba.ingestion.nba_client import get_daily_games, get_combined_team_stats, get_line_scores
+from sports.nba.ingestion.odds_client import get_odds
+from sports.nba.ingestion.recent_form import enrich_with_form
+from sports.nba.ingestion.travel_client import enrich_with_travel
+from sports.nba.model.monte_carlo import enrich_predictions_with_mc
+from sports.nba.model.predictor import predict
+from sports.nba.model.value_detector import detect_value_bets
+from sports.nba.processing.features import build_features, clean_team_stats
 from utils.logger import get_logger
 
 logger = get_logger("run_pipeline")
@@ -68,7 +68,7 @@ def run(date_str: str) -> dict[str, pd.DataFrame]:
         team_stats_df = clean_team_stats(get_combined_team_stats(NBA_SEASON))
     except Exception as exc:
         logger.warning("get_combined_team_stats falló (%s) — stats básicas", exc)
-        from ingestion.nba_client import get_team_stats
+        from sports.nba.ingestion.nba_client import get_team_stats
         team_stats_df = clean_team_stats(get_team_stats(NBA_SEASON))
 
     # 3. Forma reciente
@@ -285,7 +285,7 @@ def save_to_supabase(data: dict[str, pd.DataFrame]) -> None:
         return
 
     try:
-        from database.repository import DatabaseRepository
+        from sports.nba.database.repository import DatabaseRepository
         repo = DatabaseRepository()
 
         if not data.get("games", pd.DataFrame()).empty:
