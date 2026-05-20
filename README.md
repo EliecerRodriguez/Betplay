@@ -1,6 +1,6 @@
-﻿# NBA Betplay Analytics
+﻿# Betplay Analytics — NBA + ATP
 
-Sistema de predicción NBA con detección de value bets usando modelos de Machine Learning.
+Sistema de predicción multi-deporte (NBA y tenis ATP) con detección de value bets usando modelos de Machine Learning.
 
 ---
 
@@ -57,11 +57,41 @@ cd C:\Betplay
 .\.venv\Scripts\Activate.ps1
 $env:PYTHONPATH = "C:\Betplay"
 python reconcile.py       # recupera resultados de todos los días pendientes
-python run_pipeline.py    # genera predicciones del día actual
+python run_pipeline.py    # genera predicciones NBA del día actual
+python run_atp_pipeline.py  # genera predicciones ATP del día actual
 ```
 
 > `reconcile.py` revisa TODAS las predicciones sin resultado desde cualquier fecha pasada,
 > no solo el día anterior. Si te olvidaste varios días, una sola ejecución lo recupera todo.
+
+---
+
+## Pipeline ATP (tennis)
+
+### Ejecución diaria
+
+```powershell
+cd C:\Betplay
+.\.venv\Scripts\Activate.ps1
+$env:PYTHONPATH = "C:\Betplay"
+python run_atp_pipeline.py              # predicciones de hoy
+python run_atp_pipeline.py --date 2026-05-20  # fecha específica
+python run_atp_pipeline.py --no-save   # solo consola, sin guardar CSV
+```
+
+Salida en `output/`:
+- `atp_predictions.csv` — predicciones del día
+- `atp_value_bets.csv`  — oportunidades de valor detectadas
+- `atp_odds.csv`        — snapshot de cuotas Kambi (Betplay/Rushbet)
+
+### Reentrenar el modelo ATP (cada temporada)
+
+```powershell
+python build_elos.py --start-year 2010   # actualizar Elos (una vez por temporada)
+python build_atp_model.py --force        # re-entrenar con datos hasta el año actual
+```
+
+Modelo guardado en `sports/atp/models/atp_model_v1.joblib`.
 
 ---
 
@@ -130,9 +160,11 @@ Set-ScheduledTask -TaskName "Betplay Pipeline"  -Settings $s
 
 | Archivo | Cuándo modificar |
 |---|---|
-| `output/bet_journal.csv` | Borrar solo al cambiar versión del modelo |
+| `output/bet_journal.csv` | Borrar solo al cambiar versión del modelo NBA |
 | `output/*.csv` | Nunca — se sobreescriben solos |
 | `models/nba_model_vN.joblib` | Nunca — guardar todos como respaldo |
+| `sports/atp/models/atp_model_v1.joblib` | Nunca — solo al re-entrenar |
+| `sports/atp/models/current_elos.json` | Se regenera con `build_elos.py` |
 | `database/cron_local.bat` | Solo si cambias horarios del Task Scheduler |
 | `reconcile.py` | No tocar |
 
@@ -140,7 +172,13 @@ Set-ScheduledTask -TaskName "Betplay Pipeline"  -Settings $s
 
 ## Versiones del modelo
 
+### NBA
 | Versión | Tipo | Fecha | Accuracy | Notas |
 |---|---|---|---|---|
 | v9 | StackingClassifier (XGB+RF+LR) | May 2026 | 66.2% | Baseline |
 | v10+ | StackingClassifier (XGB+RF+LR) | — | — | Rolling stats + injury feature |
+
+### ATP
+| Versión | Tipo | Fecha | Val Accuracy | Val ROC-AUC | Notas |
+|---|---|---|---|---|---|
+| v1 | XGBoost + calibración isotónica | May 2026 | 63.6% | 0.698 | 13 features, train 2013-2023, val 2024 |

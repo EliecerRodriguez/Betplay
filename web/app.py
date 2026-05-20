@@ -72,6 +72,10 @@ _TEAM_STATS_TTL = 6 * 3600   # segundos
 _ODDS_CACHE: dict[str, dict] = {}   # key: date_str -> {"df": DataFrame, "ts": float}
 _ODDS_TTL = 30 * 60   # 30 minutos
 
+# Caché ATP — 10 min (misma TTL que pipeline NBA)
+_ATP_CACHE: dict[str, dict] = {}
+_ATP_CACHE_TTL = 10 * 60
+
 # ── Persistencia (Supabase / PostgreSQL) ─────────────────────────────────────
 
 _repo = None   # singleton lazy — se inicializa en el primer request
@@ -1221,6 +1225,186 @@ def get_backtest(bankroll: float = Query(default=500_000)):
         "daily":            daily_list,
         "sparkline":        [{"date": d["date"], "bankroll": d["running_bankroll"]} for d in daily_list if not d["has_pending"]],
     }
+
+
+# ── ATP pipeline ──────────────────────────────────────────────────────────────
+
+_ATP_LEVEL_LABELS = {
+    "G": "Grand Slam", "M": "Masters 1000",
+    "F": "ATP Finals", "A": "ATP 500/250",
+    "C": "Challenger", "D": "Copa Davis",
+}
+
+
+def _run_atp(date_str: str) -> dict:
+    """Ejecuta el pipeline ATP y construye la respuesta JSON para el dashboard."""
+    from run_atp_pipeline import run as atp_run
+
+    result   = atp_run(date_str=date_str, save=True)
+    preds_df = result.get("predictions", pd.DataFrame())
+    odds_df  = result.get("odds",        pd.DataFrame())
+    vb_df    = result.get("value_bets",  pd.DataFrame())
+
+    if preds_df.empty:
+        return {
+            "date": date_str, "matches": [],
+            "summary": {"total_matches": 0, "value_bets_count": 0, "best_opportunity": None},
+        }
+
+    matches = []
+    for _, pred in preds_df.iterrows():
+        p1      = str(pred.get("player1_name", ""))
+        p2      = str(pred.get("player2_name", ""))
+        mid     = str(pred.get("match_id", ""))
+        surface = str(pred.get("surface", "Hard"))
+        tourney = str(pred.get("tourney_name", ""))
+        level   = str(pred.get("tourney_level", "A"))
+
+        p1_prob     = round(float(pred.get("p1_win_prob", 0.5)) * 100, 1)
+        p2_prob     = round(float(pred.get("p2_win_prob", 0.5)) * 100, 1)
+        p1_elo_prob = round(float(pred.get("p1_elo_prob", 0.5)) * 100, 1)
+        p1_elo      = round(float(pred.get("p1_elo", 1500.0)), 0)
+        p2_elo      = round(float(pred.get("p2_elo", 1500.0)), 0)
+        elo_diff    = round(float(pred.get("elo_diff", 0.0)), 1)
+        method      = str(pred.get("method", "elo"))
+
+        mp_raw = pred.get("model_prob")
+        model_prob = round(float(mp_raw) * 100, 1) if pd.notna(mp_raw) and mp_raw is not None else None
+
+        max_prob   = max(p1_prob, p2_prob)
+        confidence = "Alta" if max_prob >= 70 else "Media" if max_prob >= 60 else "Baja"
+        p1_is_fav  = p1_prob >= p2_prob
+
+        # ── Cuotas para este partido ──────────────────────────────────────────
+        match_odds: list[dict] = []
+        best_p1: dict = {"bookmaker": "—", "odds": 0.0}
+        best_p2: dict = {"bookmaker": "—", "odds": 0.0}
+
+        if not odds_df.empty and "player1_name" in odds_df.columns:
+            p1_n = p1.lower()
+            p2_n = p2.lower()
+            mdf = odds_df[
+                (
+                    odds_df["player1_name"].str.lower().str.contains(p1_n, na=False) |
+                    odds_df["player2_name"].str.lower().str.contains(p1_n, na=False)
+                ) & (
+                    odds_df["player1_name"].str.lower().str.contains(p2_n, na=False) |
+                    odds_df["player2_name"].str.lower().str.contains(p2_n, na=False)
+                )
+            ]
+            for _, odd_row in mdf.iterrows():
+                inverted = p1_n in str(odd_row.get("player2_name", "")).lower()
+                if inverted:
+                    o1 = float(odd_row.get("player2_odds", 0) or 0)
+                    o2 = float(odd_row.get("player1_odds", 0) or 0)
+                else:
+                    o1 = float(odd_row.get("player1_odds", 0) or 0)
+                    o2 = float(odd_row.get("player2_odds", 0) or 0)
+                bm = str(odd_row.get("bookmaker", ""))
+                match_odds.append({
+                    "bookmaker": bm,
+                    "player1_odds": round(o1, 2),
+                    "player2_odds": round(o2, 2),
+                })
+                if o1 > best_p1["odds"]:
+                    best_p1 = {"bookmaker": bm, "odds": o1}
+                if o2 > best_p2["odds"]:
+                    best_p2 = {"bookmaker": bm, "odds": o2}
+
+        # ── Value bets para este partido ──────────────────────────────────────
+        match_vbs: list[dict] = []
+        if not vb_df.empty and "match_id" in vb_df.columns:
+            for _, vb_row in vb_df[vb_df["match_id"] == mid].iterrows():
+                model_p  = float(vb_row.get("model_prob", 0) or 0)
+                market_o = float(vb_row.get("market_odds", 0) or 0)
+                val      = float(vb_row.get("value", 0) or 0)
+                kel      = float(vb_row.get("kelly_fraction", 0) or 0)
+                match_vbs.append({
+                    "player":         str(vb_row.get("player", "")),
+                    "bookmaker":      str(vb_row.get("bookmaker", "")),
+                    "market_odds":    round(market_o, 2),
+                    "model_prob_pct": round(model_p * 100, 1),
+                    "market_prob_pct": round((1 / market_o * 100) if market_o > 0 else 0, 1),
+                    "value_pct":      round(val * 100, 2),
+                    "kelly_fraction": round(kel, 4),
+                    "kelly_pct":      round(kel * 100, 3),
+                    "is_value_bet":   val >= 0.05,
+                })
+
+        matches.append({
+            "match_id":          mid,
+            "player1":           p1,
+            "player2":           p2,
+            "surface":           surface,
+            "tourney_name":      tourney,
+            "tourney_level":     level,
+            "tourney_level_label": _ATP_LEVEL_LABELS.get(level, "ATP"),
+            "game_date":         str(pred.get("game_date", date_str))[:10],
+            "p1_win_prob":       p1_prob,
+            "p2_win_prob":       p2_prob,
+            "p1_elo_prob":       p1_elo_prob,
+            "p1_elo":            p1_elo,
+            "p2_elo":            p2_elo,
+            "elo_diff":          elo_diff,
+            "model_prob":        model_prob,
+            "method":            method,
+            "confidence":        confidence,
+            "p1_is_fav":         p1_is_fav,
+            "odds":              match_odds,
+            "best_odds":         {"player1": best_p1, "player2": best_p2},
+            "value_bets":        match_vbs,
+            "has_value":         any(v["is_value_bet"] for v in match_vbs),
+        })
+
+    # Ordenar: value bets primero, luego por confianza
+    conf_order = {"Alta": 0, "Media": 1, "Baja": 2}
+    matches.sort(key=lambda m: (not m["has_value"], conf_order.get(m["confidence"], 3)))
+
+    all_vbs = [v for m in matches for v in m["value_bets"] if v["is_value_bet"]]
+    best_vb = max(all_vbs, key=lambda x: x["value_pct"], default=None)
+
+    return {
+        "date": date_str,
+        "matches": matches,
+        "summary": {
+            "total_matches":    len(matches),
+            "value_bets_count": len(all_vbs),
+            "best_opportunity": (
+                f"{best_vb['player']} @ {best_vb['bookmaker']} (+{best_vb['value_pct']:.1f}% EV)"
+                if best_vb else None
+            ),
+        },
+    }
+
+
+@app.get("/api/atp/analysis")
+def get_atp_analysis(date: Optional[str] = Query(default=None)):
+    """Ejecuta el pipeline ATP y devuelve predicciones + value bets del día."""
+    import time
+    date_str = date or _date_cls.today().isoformat()
+
+    cached = _ATP_CACHE.get(date_str)
+    if cached and (time.time() - cached["ts"]) < _ATP_CACHE_TTL:
+        return cached["data"]
+
+    try:
+        data = _run_atp(date_str)
+        _ATP_CACHE[date_str] = {"data": data, "ts": time.time()}
+    except Exception as exc:
+        logger.error("ATP pipeline error [%s]: %s", date_str, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return _ATP_CACHE[date_str]["data"]
+
+
+@app.delete("/api/atp/cache")
+def clear_atp_cache(date: Optional[str] = Query(default=None)):
+    """Limpia la caché ATP."""
+    if date:
+        _ATP_CACHE.pop(date, None)
+    else:
+        _ATP_CACHE.clear()
+    return {"status": "ok", "cleared": date or "all"}
 
 
 # Archivos estáticos (al final para no interceptar rutas de la API)
