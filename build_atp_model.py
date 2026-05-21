@@ -4,7 +4,7 @@ Entrena el modelo predictivo ATP.
 Flujo:
   1. Descarga y cachea partidos históricos (2010–presente) desde Jeff Sackmann
   2. Construye features de entrenamiento (loop progresivo sin look-ahead bias)
-  3. Split temporal: 2013-2023 train | 2024-2024 validación
+  3. Split temporal: 2013-2025 train | 2024 validación
   4. Entrena XGBoost (con calibración de probabilidades isotónica)
   5. Fallback a LogisticRegression si XGBoost no está disponible
   6. Evalúa: accuracy, ROC-AUC, Brier score
@@ -12,7 +12,7 @@ Flujo:
 
 Uso:
   python build_atp_model.py
-  python build_atp_model.py --start-year 2010 --train-until 2023 --val-year 2024
+  python build_atp_model.py --start-year 2010 --train-until 2025 --val-year 2024
 
 El modelo se guarda con el pipeline completo (imputer + scaler + classifier + calibración),
 listo para usar con model.predict_proba(X).
@@ -121,7 +121,7 @@ def _evaluate(model, X: pd.DataFrame, y: pd.Series, label: str = "val") -> dict:
 
 def main(
     start_year: int = 2010,
-    train_until: int = 2023,
+    train_until: int = 2025,
     val_year: int = 2024,
     min_year: int = 2013,
     force: bool = False,
@@ -217,7 +217,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--train-until", type=int, default=2023,
-        help="Último año de entrenamiento (default: 2023)"
+        help="Último año de entrenamiento (default: 2025)"
     )
     parser.add_argument(
         "--val-year", type=int, default=2024,

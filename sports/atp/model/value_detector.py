@@ -32,8 +32,8 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 # ── Umbrales ──────────────────────────────────────────────────────────────────
-VALUE_THRESHOLD      = 0.05   # 5% de valor mínimo (filtra ruido)
-MIN_MODEL_CONFIDENCE = 0.52   # el modelo debe tener al menos 52% para considerar
+VALUE_THRESHOLD      = 0.08   # 8% de valor mínimo (filtra ruido)
+MIN_MODEL_CONFIDENCE = 0.62   # el modelo debe tener al menos 62% para considerar
 MIN_ODDS             = 1.40   # no analizar cuotas menores (favorito muy claro)
 MAX_ODDS             = 15.0   # no analizar cuotas mayores (demasiado inciertas)
 

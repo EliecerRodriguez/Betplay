@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date as _date_cls
+from datetime import date as _date_cls, timedelta
 from datetime import datetime
 from typing import Optional
 
@@ -59,7 +59,8 @@ async def _startup_preload() -> None:
     loop = asyncio.get_running_loop()
     loop.run_in_executor(None, _get_team_stats_cached)
     loop.run_in_executor(None, _fetch_and_reconcile_results)
-    logger.info("Startup: pre-carga de team stats y reconciliación de resultados lanzadas en background")
+    loop.run_in_executor(None, _fetch_and_reconcile_atp_results)
+    logger.info("Startup: pre-carga de team stats y reconciliación NBA+ATP lanzadas en background")
 
 _CACHE: dict[str, dict] = {}   # key: date_str -> {"data": ..., "ts": float}
 _CACHE_TTL = 10 * 60           # 10 minutos — refresca cuotas y predicciones automáticamente
@@ -703,21 +704,89 @@ def _log_atp_bets_to_journal(data: dict, bankroll: float) -> None:
         logger.info("ATP journal: %d nuevas apuestas registradas para %s", len(new_rows), date_str)
 
 
+def _fetch_atp_completed_from_espn(pending_dates: list) -> list[dict]:
+    """
+    Obtiene resultados de partidos ATP Men's Singles completados desde ESPN.
+    No requiere clave API.
+
+    Returns:
+        Lista de dicts {player1, player2, winner}
+    """
+    import requests as _req
+    if not pending_dates:
+        return []
+
+    # Una sola llamada con la fecha más reciente cubre todos los torneos activos
+    query_date = max(pending_dates).replace("-", "")
+    try:
+        r = _req.get(
+            "https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard",
+            params={"dates": query_date},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=20,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as exc:
+        logger.warning("ATP reconcile: ESPN API falló: %s", exc)
+        return []
+
+    results: list[dict] = []
+    for event in data.get("events", []):
+        for grouping in event.get("groupings", []):
+            grp_name = grouping.get("name", "").lower()
+            for comp in grouping.get("competitions", []):
+                # Solo partidos finalizados
+                if (comp.get("status") or {}).get("type", {}).get("name") != "STATUS_FINAL":
+                    continue
+                # Solo Men's Singles (excluye dobles y femenino)
+                comp_type = (comp.get("type") or {}).get("text", "").lower()
+                if "men" not in comp_type and "men" not in grp_name:
+                    continue
+                if "singles" not in comp_type and "singles" not in grp_name:
+                    continue
+                if "women" in comp_type or "women" in grp_name:
+                    continue
+
+                competitors = [c for c in comp.get("competitors", []) if c.get("type") == "athlete"]
+                if len(competitors) < 2:
+                    continue
+                winner_name = None
+                player_names: list[str] = []
+                for c in competitors:
+                    name = (c.get("athlete") or {}).get("displayName", "")
+                    if not name:
+                        continue
+                    player_names.append(name)
+                    if c.get("winner"):
+                        winner_name = name
+                if winner_name and len(player_names) == 2:
+                    results.append({"player1": player_names[0], "player2": player_names[1], "winner": winner_name})
+
+    logger.info("ATP reconcile: %d Men's Singles completados desde ESPN para %s", len(results), query_date)
+    return results
+
+
 def _fetch_and_reconcile_atp_results() -> int:
     """
-    Cruza las apuestas ATP pendientes con resultados reales del dataset de Sackmann.
+    Cruza las apuestas ATP pendientes con resultados reales.
 
-    1. Lee atp_bet_journal.csv; detecta filas sin resultado y game_date < hoy.
-    2. Descarga/cachea los CSVs anuales de Sackmann (force si el año es el actual).
-    3. Para cada apuesta pendiente busca el partido por nombre de jugador ± 14 días.
-    4. Rellena actual_winner, correct y pl; guarda el journal actualizado.
+    Fuentes (en orden de prioridad):
+      1. ESPN scoreboard API    — gratuita, sin clave, resultados en tiempo real.
+      2. The Odds API /scores   — si ODDS_API_KEY está configurada.
+      3. Dataset Sackmann       — fallback histórico (puede tener retraso de semanas).
+
+    Corrección: se incluyen partidos de HOY (<=) porque pueden estar
+    terminados aunque la fecha de juego sea la misma fecha actual.
 
     Returns:
         Número de apuestas actualizadas con resultado real.
     """
     import time as _time
+    import requests as _requests
     from sports.atp.ingestion.historical_client import _download_year
     from sports.atp.config.settings import ATP_CACHE_DIR
+    from config.settings import ODDS_API_KEY, ODDS_API_BASE_URL
 
     journal_path = os.path.join(_BASE_DIR, "output", "atp_bet_journal.csv")
     today_str    = _date_cls.today().isoformat()
@@ -736,46 +805,17 @@ def _fetch_and_reconcile_atp_results() -> int:
         if col not in jdf.columns:
             jdf[col] = ""
 
+    # FIX: <= incluye partidos de hoy que ya terminaron
     needs_mask = (
         (jdf["correct"].isna() | jdf["correct"].astype(str).str.strip().isin(["", "nan"]))
-        & (jdf["game_date"].str[:10] < today_str)
+        & (jdf["game_date"].str[:10] <= today_str)
     )
     if not needs_mask.any():
         logger.info("ATP reconcile: todas las apuestas pasadas ya tienen resultado")
         return 0
 
     pending_df    = jdf[needs_mask]
-    pending_years = sorted(set(pending_df["game_date"].str[:4].dropna().unique()))
-
-    all_matches: list[pd.DataFrame] = []
-    for year_str in pending_years:
-        try:
-            year = int(year_str)
-        except ValueError:
-            continue
-        # Forzar re-descarga para el año en curso si el caché tiene > 6 h
-        cache_file = os.path.join(ATP_CACHE_DIR, f"atp_matches_{year}.csv")
-        force = year == current_year and (
-            not os.path.exists(cache_file)
-            or (_time.time() - os.path.getmtime(cache_file)) > 6 * 3600
-        )
-        try:
-            df = _download_year(year, force=force)
-            if df is not None and not df.empty:
-                all_matches.append(df)
-        except Exception as exc:
-            logger.warning("ATP reconcile: descarga %d falló: %s", year, exc)
-
-    if not all_matches:
-        logger.info("ATP reconcile: sin datos Sackmann disponibles")
-        return 0
-
-    matches_df = pd.concat(all_matches, ignore_index=True)
-    matches_df["_tourney_dt"] = pd.to_datetime(
-        matches_df["tourney_date"].astype(str).str.strip().str[:8],
-        format="%Y%m%d", errors="coerce",
-    )
-    matches_df = matches_df.dropna(subset=["_tourney_dt", "winner_name", "loser_name"])
+    pending_dates = sorted(set(pending_df["game_date"].str[:10].dropna().unique()))
 
     def _names_match(n1: str, n2: str) -> bool:
         a, b = n1.lower().strip(), n2.lower().strip()
@@ -786,45 +826,154 @@ def _fetch_and_reconcile_atp_results() -> int:
         sa, sb = a.split()[-1], b.split()[-1]
         if len(sa) > 3 and sa == sb:
             return True
-        return a in b or b in a
+        if a in b or b in a:
+            return True
+        # Maneja formatos cortos tipo "Tsitsipas S." vs "Stefanos Tsitsipas"
+        if len(sa) > 3 and sa in b:
+            return True
+        if len(sb) > 3 and sb in a:
+            return True
+        return False
 
-    updated = 0
-    for idx in pending_df.index:
-        row = jdf.loc[idx]
-        predicted  = str(row.get("predicted_player", "")).strip()
-        opponent   = str(row.get("opponent",         "")).strip()
-        gdate_str  = str(row.get("game_date",        ""))[:10]
-
-        if not predicted or not gdate_str:
-            continue
-        try:
-            game_dt = pd.to_datetime(gdate_str)
-        except Exception:
-            continue
-
-        # Sackmann tourney_date = inicio del torneo (hasta 14 días antes del partido)
-        window = matches_df[
-            (matches_df["_tourney_dt"] >= game_dt - pd.Timedelta(days=14)) &
-            (matches_df["_tourney_dt"] <= game_dt + pd.Timedelta(days=1))
-        ]
-        if window.empty:
-            continue
-
-        for _, m in window.iterrows():
-            wn, ln = str(m.get("winner_name", "")), str(m.get("loser_name", ""))
-            pred_wins = _names_match(predicted, wn) and _names_match(opponent, ln)
-            pred_loses = _names_match(predicted, ln) and _names_match(opponent, wn)
-            if pred_wins or pred_loses:
-                correct    = pred_wins
+    def _apply_results(src_records: list[dict], target_df: "pd.DataFrame") -> int:
+        """Aplica resultados de una lista [{player1, player2, winner}] al journal."""
+        count = 0
+        for idx in target_df.index:
+            row       = jdf.loc[idx]
+            predicted = str(row.get("predicted_player", "")).strip()
+            opponent  = str(row.get("opponent",         "")).strip()
+            if not predicted:
+                continue
+            for rec in src_records:
+                p1, p2, winner = rec["player1"], rec["player2"], rec["winner"]
+                if not (_names_match(predicted, p1) or _names_match(predicted, p2)):
+                    continue
+                if not (_names_match(opponent, p1) or _names_match(opponent, p2)):
+                    continue
+                correct    = _names_match(predicted, winner)
                 bet_amount = float(row.get("bet_amount",    0) or 0)
                 pot_gain   = float(row.get("potential_gain", 0) or 0)
-                jdf.at[idx, "actual_winner"] = wn
+                jdf.at[idx, "actual_winner"] = winner
                 jdf.at[idx, "correct"] = "1" if correct else "0"
                 jdf.at[idx, "pl"] = str(round(pot_gain) if correct else round(-bet_amount))
-                updated += 1
+                count += 1
                 break
+        return count
+
+    updated = 0
+
+    # ── Fuente 1: ESPN (gratuita, sin clave) ──────────────────────────────────
+    espn_results = _fetch_atp_completed_from_espn(pending_dates)
+    if espn_results:
+        updated += _apply_results(espn_results, pending_df)
+
+    # ── Fuente 2: The Odds API /scores (si hay clave) ─────────────────────────
+    still_pending_mask = (
+        (jdf["correct"].isna() | jdf["correct"].astype(str).str.strip().isin(["", "nan"]))
+        & (jdf["game_date"].str[:10] <= today_str)
+    )
+    still_pending_df = jdf[still_pending_mask]
+
+    if not still_pending_df.empty and ODDS_API_KEY:
+        try:
+            scores_r = _requests.get(
+                f"{ODDS_API_BASE_URL}/sports/tennis_atp/scores",
+                params={"apiKey": ODDS_API_KEY, "daysFrom": 3, "dateFormat": "iso"},
+                timeout=15,
+            )
+            scores_r.raise_for_status()
+            odds_completed = [
+                e for e in scores_r.json()
+                if e.get("completed") and e.get("scores") and len(e["scores"]) >= 2
+            ]
+            logger.info("ATP reconcile: %d eventos desde The Odds API", len(odds_completed))
+            odds_records: list[dict] = []
+            for event in odds_completed:
+                scores = event["scores"]
+                try:
+                    s0, s1 = int(scores[0]["score"]), int(scores[1]["score"])
+                except (ValueError, TypeError):
+                    continue
+                odds_records.append({
+                    "player1": scores[0]["name"],
+                    "player2": scores[1]["name"],
+                    "winner":  scores[0]["name"] if s0 > s1 else scores[1]["name"],
+                })
+            if odds_records:
+                updated += _apply_results(odds_records, still_pending_df)
+        except Exception as exc:
+            logger.warning("ATP reconcile: The Odds API scores falló: %s", exc)
+
+    # ── Fuente 3: Sackmann histórico (fallback para fechas más antiguas) ──────
+    still_pending_mask = (
+        (jdf["correct"].isna() | jdf["correct"].astype(str).str.strip().isin(["", "nan"]))
+        & (jdf["game_date"].str[:10] <= today_str)
+    )
+    still_pending_df = jdf[still_pending_mask]
+
+    if not still_pending_df.empty:
+        pending_years = sorted(set(still_pending_df["game_date"].str[:4].dropna().unique()))
+        all_matches: list[pd.DataFrame] = []
+        for year_str in pending_years:
+            try:
+                year = int(year_str)
+            except ValueError:
+                continue
+            cache_file = os.path.join(ATP_CACHE_DIR, f"atp_matches_{year}.csv")
+            force = year == current_year and (
+                not os.path.exists(cache_file)
+                or (_time.time() - os.path.getmtime(cache_file)) > 6 * 3600
+            )
+            try:
+                df = _download_year(year, force=force)
+                if df is not None and not df.empty:
+                    all_matches.append(df)
+            except Exception as exc:
+                logger.warning("ATP reconcile: descarga %d falló: %s", year, exc)
+
+        if all_matches:
+            matches_df = pd.concat(all_matches, ignore_index=True)
+            matches_df["_tourney_dt"] = pd.to_datetime(
+                matches_df["tourney_date"].astype(str).str.strip().str[:8],
+                format="%Y%m%d", errors="coerce",
+            )
+            matches_df = matches_df.dropna(subset=["_tourney_dt", "winner_name", "loser_name"])
+
+            for idx in still_pending_df.index:
+                row       = jdf.loc[idx]
+                predicted = str(row.get("predicted_player", "")).strip()
+                opponent  = str(row.get("opponent",         "")).strip()
+                gdate_str = str(row.get("game_date",        ""))[:10]
+                if not predicted or not gdate_str:
+                    continue
+                try:
+                    game_dt = pd.to_datetime(gdate_str)
+                except Exception:
+                    continue
+                window = matches_df[
+                    (matches_df["_tourney_dt"] >= game_dt - pd.Timedelta(days=14)) &
+                    (matches_df["_tourney_dt"] <= game_dt + pd.Timedelta(days=1))
+                ]
+                if window.empty:
+                    continue
+                for _, m in window.iterrows():
+                    wn, ln = str(m.get("winner_name", "")), str(m.get("loser_name", ""))
+                    pred_wins  = _names_match(predicted, wn) and _names_match(opponent, ln)
+                    pred_loses = _names_match(predicted, ln) and _names_match(opponent, wn)
+                    if pred_wins or pred_loses:
+                        correct    = pred_wins
+                        bet_amount = float(row.get("bet_amount",    0) or 0)
+                        pot_gain   = float(row.get("potential_gain", 0) or 0)
+                        jdf.at[idx, "actual_winner"] = wn
+                        jdf.at[idx, "correct"] = "1" if correct else "0"
+                        jdf.at[idx, "pl"] = str(round(pot_gain) if correct else round(-bet_amount))
+                        updated += 1
+                        break
+                else:
+                    logger.debug("ATP reconcile: sin resultado Sackmann para %s vs %s (%s)",
+                                 predicted, opponent, gdate_str)
         else:
-            logger.debug("ATP reconcile: sin resultado para %s vs %s (%s)", predicted, opponent, gdate_str)
+            logger.info("ATP reconcile: sin datos Sackmann disponibles para fechas históricas")
 
     if updated > 0:
         try:
@@ -972,7 +1121,7 @@ def _fetch_and_reconcile_results() -> int:
         gid = str(row.get("game_id", "")).strip()
         hw_raw = str(row.get("home_win", "")).strip()
         if gid in actual_results and hw_raw in ("", "nan"):
-            pred_df.at[idx, "home_win"] = actual_results[gid]
+            pred_df.at[idx, "home_win"] = str(actual_results[gid])
             updated += 1
 
     if updated > 0:
@@ -1229,7 +1378,8 @@ def get_accuracy():
 
 
 @app.get("/api/backtest")
-def get_backtest(bankroll: float = Query(default=500_000)):
+def get_backtest(bankroll: float = Query(default=500_000), period: str = Query(default="all"),
+                 start_date: Optional[str] = Query(default=None), end_date: Optional[str] = Query(default=None)):
     """Historial real de apuestas: lee bet_journal.csv y cruza con line_scores para resultados."""
     # Reconciliar resultados antes de construir el historial (actualiza predictions.csv y line_scores.csv)
     try:
@@ -1274,6 +1424,31 @@ def get_backtest(bankroll: float = Query(default=500_000)):
         }
 
     journal_df = pd.read_csv(journal_path)
+
+    # ── Meses disponibles (del historial completo, antes de filtrar) ─────────
+    available_months: list[str] = []
+    if "game_date" in journal_df.columns:
+        available_months = sorted(
+            journal_df["game_date"].astype(str).str[:7].dropna().unique().tolist(),
+            reverse=True
+        )
+
+    # ── Filtro de período / fechas ───────────────────────────────────────────
+    if "game_date" in journal_df.columns:
+        dates = journal_df["game_date"].astype(str).str[:10]
+        if start_date or end_date:
+            if start_date:
+                journal_df = journal_df[dates >= start_date]
+            if end_date:
+                journal_df = journal_df[dates <= end_date]
+        elif period != "all":
+            today = _date_cls.today()
+            if period == "today":
+                journal_df = journal_df[dates == today.isoformat()]
+            elif period == "week":
+                journal_df = journal_df[dates >= (today - timedelta(days=7)).isoformat()]
+            elif period == "month":
+                journal_df = journal_df[dates >= (today - timedelta(days=30)).isoformat()]
 
     # ── Mapa game_id → home_team_id (desde predictions.csv) ──────────────────
     home_map: dict[str, int] = {}
@@ -1438,10 +1613,8 @@ def get_backtest(bankroll: float = Query(default=500_000)):
         "models":           dict(sorted(model_stats.items())),
         "daily":            daily_list,
         "sparkline":        [{"date": d["date"], "bankroll": d["running_bankroll"]} for d in daily_list if not d["has_pending"]],
+        "available_months": available_months,
     }
-
-
-# ── ATP pipeline ──────────────────────────────────────────────────────────────
 
 _ATP_LEVEL_LABELS = {
     "G": "Grand Slam", "M": "Masters 1000",
@@ -1630,8 +1803,20 @@ def clear_atp_cache(date: Optional[str] = Query(default=None)):
     return {"status": "ok", "cleared": date or "all"}
 
 
+@app.get("/api/atp/reconcile")
+def reconcile_atp_results():
+    """Reconcilia resultados reales de apuestas ATP pasadas."""
+    try:
+        updated = _fetch_and_reconcile_atp_results()
+        return {"status": "ok", "bets_updated": updated}
+    except Exception as exc:
+        logger.error("reconcile_atp_results error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/atp/backtest")
-def get_atp_backtest(bankroll: float = Query(default=500_000)):
+def get_atp_backtest(bankroll: float = Query(default=500_000), period: str = Query(default="all"),
+                    start_date: Optional[str] = Query(default=None), end_date: Optional[str] = Query(default=None)):
     """Historial de apuestas ATP: reconcilia resultados reales y devuelve estadísticas."""
     try:
         _fetch_and_reconcile_atp_results()
@@ -1649,6 +1834,31 @@ def get_atp_backtest(bankroll: float = Query(default=500_000)):
         }
 
     journal_df = pd.read_csv(journal_path)
+
+    # ── Meses disponibles (del historial completo, antes de filtrar) ─────────
+    available_months: list[str] = []
+    if "game_date" in journal_df.columns:
+        available_months = sorted(
+            journal_df["game_date"].astype(str).str[:7].dropna().unique().tolist(),
+            reverse=True
+        )
+
+    # ── Filtro de período / fechas ───────────────────────────────────────────
+    if "game_date" in journal_df.columns:
+        dates = journal_df["game_date"].astype(str).str[:10]
+        if start_date or end_date:
+            if start_date:
+                journal_df = journal_df[dates >= start_date]
+            if end_date:
+                journal_df = journal_df[dates <= end_date]
+        elif period != "all":
+            today = _date_cls.today()
+            if period == "today":
+                journal_df = journal_df[dates == today.isoformat()]
+            elif period == "week":
+                journal_df = journal_df[dates >= (today - timedelta(days=7)).isoformat()]
+            elif period == "month":
+                journal_df = journal_df[dates >= (today - timedelta(days=30)).isoformat()]
 
     records: list[dict] = []
     for _, row in journal_df.iterrows():
@@ -1786,6 +1996,7 @@ def get_atp_backtest(bankroll: float = Query(default=500_000)):
         "daily":            daily_list,
         "sparkline":        [{"date": d["date"], "bankroll": d["running_bankroll"]}
                              for d in daily_list if not d["has_pending"]],
+        "available_months": available_months,
         "sport":            "atp",
     }
 

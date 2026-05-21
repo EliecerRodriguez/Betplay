@@ -242,6 +242,10 @@
     .modal-hdr h2 { font-size:18px; font-weight:800; }
     .modal-close-btn { background:transparent; border:1px solid var(--border); color:var(--text2); width:32px; height:32px; border-radius:8px; cursor:pointer; font-size:18px; display:flex; align-items:center; justify-content:center; transition:.2s; }
     .modal-close-btn:hover { border-color:var(--accent); color:var(--text); }
+    .modal-period-bar { display:flex; gap:6px; padding:12px 24px; border-bottom:1px solid var(--border); flex-shrink:0; }
+    .period-btn { background:var(--bg-card2); border:1px solid var(--border); color:var(--text2); padding:5px 14px; border-radius:20px; font-size:12px; font-weight:600; cursor:pointer; transition:.2s; }
+    .period-btn:hover { border-color:var(--accent); color:var(--text); }
+    .period-btn.active { background:var(--accent); border-color:var(--accent); color:#fff; }
     .modal-body { overflow-y:auto; padding:24px; flex:1; }
     .bt-summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; margin-bottom:22px; }
     .bt-card { background:var(--bg-card2); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
@@ -329,6 +333,12 @@
       <h2 id="resultsModalTitle">📊 Resultados de Predicciones</h2>
       <button class="modal-close-btn" onclick="closeResults()">✕</button>
     </div>
+    <div class="modal-period-bar">
+      <button class="period-btn" id="pBtn-today" onclick="setPeriod('today')">Hoy</button>
+      <button class="period-btn" id="pBtn-week" onclick="setPeriod('week')">7 días</button>
+      <button class="period-btn" id="pBtn-month" onclick="setPeriod('month')">30 días</button>
+      <button class="period-btn active" id="pBtn-all" onclick="setPeriod('all')">Todo</button>
+    </div>
     <div class="modal-body" id="resultsBody">
       <div class="loading-wrap"><div class="spinner"></div><p>Cargando resultados…</p></div>
     </div>
@@ -340,7 +350,7 @@
 </footer>
 
 <script>
-let STATE = { data: null, atpData: null, bankroll: 500000, sport: 'nba' };
+let STATE = { data: null, atpData: null, bankroll: 500000, sport: 'nba', period: 'all', startDate: null, endDate: null };
 
 function switchSport(sport) {
   STATE.sport = sport;
@@ -386,6 +396,7 @@ async function refresh() {
       await fetch(`/api/cache?date=${date}`, { method: 'DELETE' });
       await load(date);
     } else {
+      await fetch(`/api/atp/reconcile`);
       await fetch(`/api/atp/cache?date=${date}`, { method: 'DELETE' });
       await loadATP(date);
     }
@@ -869,17 +880,69 @@ function openResults() {
   const title = document.getElementById('resultsModalTitle');
   if (title) title.textContent = sport === 'atp' ? '🎾 Resultados ATP' : '📊 Resultados NBA';
   document.getElementById('resultsModal').style.display = 'flex';
-  if (sport === 'atp') loadAtpBacktest(); else loadBacktest();
+  if (sport === 'atp') loadAtpBacktest(STATE.period); else loadBacktest(STATE.period);
 }
 function closeResults() {
   document.getElementById('resultsModal').style.display = 'none';
 }
+function setPeriod(p) {
+  STATE.period = p; STATE.startDate = null; STATE.endDate = null;
+  ['today','week','month','all'].forEach(id => {
+    const btn = document.getElementById('pBtn-' + id);
+    if (btn) btn.className = 'period-btn' + (id === p ? ' active' : '');
+  });
+  document.querySelectorAll('.month-chip').forEach(b => b.classList.remove('active'));
+  if (STATE.sport === 'atp') loadAtpBacktest(p); else loadBacktest(p);
+}
 
-async function loadBacktest() {
+function setMonth(ym) {
+  STATE.startDate = null; STATE.endDate = null;
+  ['today','week','month','all'].forEach(id => {
+    const btn = document.getElementById('pBtn-' + id);
+    if (btn) btn.className = 'period-btn';
+  });
+  document.querySelectorAll('.month-chip').forEach(b => {
+    b.classList.toggle('active', b.dataset.ym === ym);
+  });
+  const [y, m] = ym.split('-').map(Number);
+  const start = `${ym}-01`;
+  const end   = `${ym}-${String(new Date(y, m, 0).getDate()).padStart(2,'0')}`;
+  STATE.startDate = start; STATE.endDate = end;
+  if (STATE.sport === 'atp') loadAtpBacktest('all', start, end); else loadBacktest('all', start, end);
+}
+
+function updateMonthChips(months) {
+  document.querySelectorAll('.month-chip').forEach(c => c.remove());
+  const sep = document.getElementById('period-month-sep');
+  if (sep) sep.remove();
+  const bar = document.querySelector('.modal-period-bar');
+  if (!bar || !months || months.length === 0) return;
+  const sepEl = document.createElement('span');
+  sepEl.id = 'period-month-sep';
+  sepEl.style.cssText = 'width:1px;background:var(--border);margin:0 4px;align-self:stretch;flex-shrink:0';
+  bar.appendChild(sepEl);
+  months.forEach(ym => {
+    const [y, mo] = ym.split('-');
+    const label = new Date(parseInt(y), parseInt(mo)-1, 1).toLocaleDateString('es-CO', {month:'short', year:'2-digit'});
+    const btn = document.createElement('button');
+    btn.className = 'period-btn month-chip';
+    btn.dataset.ym = ym;
+    btn.textContent = label;
+    if (STATE.startDate === `${ym}-01`) btn.classList.add('active');
+    btn.onclick = () => setMonth(ym);
+    bar.appendChild(btn);
+  });
+}
+
+async function loadBacktest(period = 'all', startDate = null, endDate = null) {
+  STATE.period = period; STATE.startDate = startDate; STATE.endDate = endDate;
   document.getElementById('resultsBody').innerHTML = '<div class="loading-wrap"><div class="spinner"></div><p>Calculando resultados históricos…</p></div>';
   try {
     const br = STATE.bankroll || 500000;
-    const r  = await fetch(`/api/backtest?bankroll=${br}`);
+    let url = `/api/backtest?bankroll=${br}&period=${period}`;
+    if (startDate) url += `&start_date=${startDate}`;
+    if (endDate)   url += `&end_date=${endDate}`;
+    const r  = await fetch(url);
     if (!r.ok) throw new Error(await r.text());
     renderBacktest(await r.json());
   } catch(e) {
@@ -887,11 +950,15 @@ async function loadBacktest() {
   }
 }
 
-async function loadAtpBacktest() {
+async function loadAtpBacktest(period = 'all', startDate = null, endDate = null) {
+  STATE.period = period; STATE.startDate = startDate; STATE.endDate = endDate;
   document.getElementById('resultsBody').innerHTML = '<div class="loading-wrap"><div class="spinner"></div><p>Calculando resultados ATP…<br><small style="color:var(--text3)">Cruzando con dataset real de Sackmann</small></p></div>';
   try {
     const br = STATE.bankroll || 500000;
-    const r  = await fetch(`/api/atp/backtest?bankroll=${br}`);
+    let url = `/api/atp/backtest?bankroll=${br}&period=${period}`;
+    if (startDate) url += `&start_date=${startDate}`;
+    if (endDate)   url += `&end_date=${endDate}`;
+    const r  = await fetch(url);
     if (!r.ok) throw new Error(await r.text());
     renderAtpBacktest(await r.json());
   } catch(e) {
@@ -996,6 +1063,7 @@ function renderAtpBacktest(d) {
     summary + chart + models +
     `<div class="bt-sec-hdr" style="margin-top:24px">Historial diario de apuestas ATP</div>` +
     `<div id="btDailyList">${dailyHtml}</div>`;
+  updateMonthChips(d.available_months || []);
 }
 
 function renderBacktest(d) {
@@ -1110,6 +1178,7 @@ function renderBacktest(d) {
   document.getElementById('resultsBody').innerHTML =
     summary + chart + models +
     `<div class="bt-daily-wrap"><div class="bt-sec-hdr">Historial diario (más reciente primero)</div>${dailyHtml}</div>`;
+  updateMonthChips(d.available_months || []);
 }
 
 async function deleteAtpBet(matchId, predictedPlayer, bookmaker) {
@@ -1117,7 +1186,7 @@ async function deleteAtpBet(matchId, predictedPlayer, bookmaker) {
   const params = new URLSearchParams({ match_id: matchId, predicted_player: predictedPlayer, bookmaker });
   const r = await fetch(`/api/atp/journal/bet?${params}`, { method: 'DELETE' });
   if (!r.ok) { alert('Error al eliminar: ' + await r.text()); return; }
-  loadAtpBacktest();
+  loadAtpBacktest(STATE.period, STATE.startDate, STATE.endDate);
 }
 
 async function deleteNbaBet(gameId, predictedSide, betType) {
@@ -1125,7 +1194,7 @@ async function deleteNbaBet(gameId, predictedSide, betType) {
   const params = new URLSearchParams({ game_id: gameId, predicted_side: predictedSide, bet_type: betType });
   const r = await fetch(`/api/journal/bet?${params}`, { method: 'DELETE' });
   if (!r.ok) { alert('Error al eliminar: ' + await r.text()); return; }
-  loadBacktest();
+  loadBacktest(STATE.period, STATE.startDate, STATE.endDate);
 }
 
 function toggleBtDay(i) {

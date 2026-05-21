@@ -87,9 +87,15 @@ Salida en `output/`:
 ### Reentrenar el modelo ATP (cada temporada)
 
 ```powershell
-python build_elos.py --start-year 2010   # actualizar Elos (una vez por temporada)
-python build_atp_model.py --force        # re-entrenar con datos hasta el año actual
+python build_elos.py --start-year 2010              # actualizar Elos (una vez por temporada)
+python build_atp_model.py --force                   # re-entrenar (usa defaults: train hasta 2025, val 2024)
 ```
+
+> Para incluir datos del año más reciente, primero borra el caché viejo y re-entrena:
+> ```powershell
+> Remove-Item data\atp_cache\atp_matches_2026.csv   # fuerza re-descarga desde Sackmann
+> python build_atp_model.py --force --train-until 2025 --val-year 2024
+> ```
 
 Modelo guardado en `sports/atp/models/atp_model_v1.joblib`.
 
@@ -103,7 +109,7 @@ Modelo guardado en `sports/atp/models/atp_model_v1.joblib`.
 cd C:\Betplay
 .\.venv\Scripts\Activate.ps1
 $env:PYTHONPATH = "C:\Betplay"
-python train_model.py --start-date 2021-10-19 --end-date AYER --season 2024-26 --model stacking --with-form --with-travel --version vN
+python train_model.py --start-date 2021-10-19 --end-date 19 --season 2024-26 --model stacking --with-form --with-travel --version v10
 ```
 
 Reemplazar `AYER` con la fecha real (ej. `2026-05-25`) y `vN` con la siguiente versión (v10, v11…).
@@ -121,13 +127,7 @@ MODEL_VERSION=vN
 MODEL_TYPE=stacking
 ```
 
-### 3. Borrar el journal (una vez por cambio de versión)
-
-```powershell
-Remove-Item "C:\Betplay\output\bet_journal.csv"
-```
-
-### 4. Reiniciar el servidor
+### 3. Reiniciar el servidor
 
 ```
 Ctrl+C  →  uvicorn web.app:app --reload --port 8000
@@ -160,7 +160,7 @@ Set-ScheduledTask -TaskName "Betplay Pipeline"  -Settings $s
 
 | Archivo | Cuándo modificar |
 |---|---|
-| `output/bet_journal.csv` | Borrar solo al cambiar versión del modelo NBA |
+| `output/bet_journal.csv` | **Nunca borrar** — historial acumulado de todas las versiones |
 | `output/*.csv` | Nunca — se sobreescriben solos |
 | `models/nba_model_vN.joblib` | Nunca — guardar todos como respaldo |
 | `sports/atp/models/atp_model_v1.joblib` | Nunca — solo al re-entrenar |
