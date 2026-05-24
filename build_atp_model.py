@@ -1,15 +1,18 @@
 """
-Entrena el modelo predictivo ATP v2.
+Entrena el modelo predictivo ATP v3.
 
 Flujo:
   1. Descarga y cachea partidos históricos (2010–presente, incluye 2026 parcial)
-  2. Construye 17 features de entrenamiento (loop progresivo sin look-ahead bias)
-     + 4 nuevas features de saque rolling (1st serve %, bp save rate, ace rate)
+  2. Construye 21 features de entrenamiento (loop progresivo sin look-ahead bias):
+     - Elo, H2H, forma reciente, superficie, nivel, ranking, experiencia
+     - Saque rolling por superficie (fallback a global si < 5 partidos)
+     - Descanso global y flag retorno de ausencia
+     - Fatiga intratorneo: sets último partido + rondas de descanso
   3. Evaluación honesta: train 2013–2024 | val 2025 (año no visto)
   4. Modelo producción: reentrena en 2013–2025 (máximo de datos completos)
   5. Arquitectura: StackingClassifier (XGBoost + RandomForest) + meta LogisticRegression
   6. Evalúa: accuracy, ROC-AUC, Brier score
-  7. Guarda modelo en sports/atp/models/atp_model_v2.joblib
+  7. Guarda modelo en sports/atp/models/atp_model_v3.joblib
 
 Uso:
   python build_atp_model.py --force
@@ -38,7 +41,7 @@ from utils.logger import get_logger
 logger = get_logger("build_atp_model")
 
 _MODEL_DIR  = "sports/atp/models"
-_MODEL_PATH = os.path.join(_MODEL_DIR, "atp_model_v2.joblib")
+_MODEL_PATH = os.path.join(_MODEL_DIR, "atp_model_v3.joblib")
 _END_YEAR   = 2026   # siempre descarga hasta el año actual para calentar Elos
 
 
@@ -213,7 +216,7 @@ def main(
 
     metrics_path = os.path.join(_MODEL_DIR, "training_metrics.txt")
     with open(metrics_path, "w", encoding="utf-8") as f:
-        f.write(f"Model          : atp_model_v2 (StackingClassifier XGB+RF+LR)\n")
+        f.write(f"Model          : atp_model_v3 (StackingClassifier XGB+RF+LR)\n")
         f.write(f"Features       : {len(FEATURE_COLUMNS)} ({', '.join(FEATURE_COLUMNS)})\n")
         f.write(f"Train data     : 2013–{train_until} | Eval split: 2013–2024 train / 2025 val\n")
         f.write(f"Elo warmup     : {start_year}–{_END_YEAR} (incluye 2026 parcial)\n")

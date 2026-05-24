@@ -30,12 +30,29 @@ Nivel del torneo:
   10. is_grand_slam
   11. is_masters
 
-Ranking ATP (disponible en predicción; puede estar ausente en training):
+Ranking ATP (disponible en predicción Y en entrenamiento vía Sackmann CSV):
   12. ranking_diff_log   log(p2_rank+1) - log(p1_rank+1)
                         positivo = p1 está mejor rankeado
 
 Historial de partidos jugados (proxy de experiencia):
   13. p1_matches_log     log(n_partidos_p1_en_esta_superficie + 1)
+
+──────────────────────────────────────────────────────────────────────
+Estadísticas de saque (rolling últimos 20 partidos):
+  14. first_serve_in_pct_diff
+  15. first_serve_win_pct_diff
+  16. bp_save_rate_diff
+  17. ace_rate_diff
+
+Descanso y ausencia:
+  18. rest_advantage_diff   p1_days_off - p2_days_off (continua, capped 60 días)
+                           positivo = p1 lleva más días sin jugar
+  19. p1_returning          1 si p1 no jugó en los últimos 30 días (retorno de ausencia)
+
+Fatiga intratorneo:
+  20. p1_sets_last_match      sets jugados por p1 en su último partido de ESTE torneo (0=primero)
+  21. tourney_rounds_rest_diff rondas de descanso de p1 − rondas de descanso de p2 dentro del torneo
+                              positivo = p1 llevó más rondas sin jugar (más descansado)
 
 ──────────────────────────────────────────────────────────────────────
 FUNCIONES PRINCIPALES
@@ -54,6 +71,7 @@ FUNCIONES PRINCIPALES
 from __future__ import annotations
 
 import math
+import re
 from collections import defaultdict, deque
 from typing import Dict, List, Optional, Tuple
 
@@ -67,6 +85,26 @@ from sports.atp.ingestion.elo import (
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# ── Helpers de módulo ─────────────────────────────────────────────────────────
+
+def _count_sets(score: str) -> int:
+    """Cuenta sets jugados en un score type '6-3 7-5' o '7-6(4) 4-6 6-4'. RET 0 si inválido."""
+    if not score or not isinstance(score, str):
+        return 0
+    return len(re.findall(r'\d+-\d+', score))
+
+
+_ROUND_ORDER: Dict[str, int] = {
+    "R128": 1, "R64": 2, "R32": 3, "R16": 4,
+    "QF": 5, "SF": 6, "F": 7, "RR": 1,
+}
+
+
+def _round_n(s) -> int:
+    """Convierte etiqueta de ronda (R128, QF, SF...) a entero ordinal."""
+    return _ROUND_ORDER.get(str(s or "").strip().upper(), 0)
 
 
 # ── Columnas del vector de features ──────────────────────────────────────────
@@ -97,9 +135,16 @@ FEATURE_COLUMNS: List[str] = [
     "first_serve_win_pct_diff",
     "bp_save_rate_diff",
     "ace_rate_diff",
+    # Descanso y retorno de ausencia
+    "rest_advantage_diff",   # p1_days_off - p2_days_off, capped 60
+    "p1_returning",          # 1 si p1 sin jugar > 30 días
+    # Fatiga intratorneo
+    "p1_sets_last_match",     # sets jugados por p1 en último partido de este torneo
+    "tourney_rounds_rest_diff", # rondas de descanso intra-torneo p1 - p2
 ]
 
-_SERVE_WINDOW = 20   # rolling window para stats de saque
+_SERVE_WINDOW    = 20   # rolling window para stats de saque
+_SURF_SERVE_MIN  = 5    # mínimo partidos en la superficie para usar stats específicas
 _SERVE_ATP_AVG: Dict[str, float] = {   # promedios ATP circuit (imputación cuando no hay historia)
     "first_serve_in_pct":  0.62,
     "first_serve_win_pct": 0.73,
@@ -186,13 +231,25 @@ def build_training_features(
         lambda: defaultdict(int)
     )
 
-    # Stats de saque rolling: {player_id: deque[(svpt, 1stIn, 1stWon, bpSaved, bpFaced, ace)]}
-    serve_stats: Dict[int, deque] = defaultdict(
+    # Stats de saque rolling: {(player_id, surface|'all'): deque}
+    # Se guarda en clave surf Y en 'all' para poder hacer fallback
+    serve_stats: Dict[Tuple, deque] = defaultdict(
         lambda: deque(maxlen=_SERVE_WINDOW)
     )
 
-    def _serve_feats(pid: int) -> Dict[str, float]:
-        hist = list(serve_stats[pid])
+    # Última fecha de partido por jugador (para calcular días de descanso)
+    _REST_CAP = 60          # cap en días (evita outliers de lesiones multi-año)
+    _REST_THRESHOLD = 30    # umbral para flag "retorno de ausencia"
+    last_match_date: Dict[int, object] = {}
+
+    # Estado de fatiga intratorneo: {(player_id, tourney_id): (last_date, sets_played)}
+    tourney_state: Dict[Tuple, object] = {}
+
+    def _serve_feats(pid: int, surf_key: str = "all") -> Dict[str, float]:
+        # Prefer surface-specific if enough history, else fall back to 'all'
+        hist = list(serve_stats[(pid, surf_key)])
+        if len(hist) < _SURF_SERVE_MIN:
+            hist = list(serve_stats[(pid, "all")])
         if len(hist) < 3:
             return dict(_SERVE_ATP_AVG)
         svpt  = sum(h[0] for h in hist)
@@ -236,13 +293,15 @@ def build_training_features(
     records = []
 
     for _, row in df.iterrows():
-        w_id = int(row["winner_id"])
-        l_id = int(row["loser_id"])
-        surf = _normalize_surface(row.get("surface", "")) or "Hard"
-        lvl  = str(row.get("tourney_level", "A") or "A")
-        date = row["tourney_date"]
-        year = date.year if pd.notna(date) else None
-        draw = int(row.get("draw_size") or 0)
+        w_id      = int(row["winner_id"])
+        l_id      = int(row["loser_id"])
+        surf      = _normalize_surface(row.get("surface", "")) or "Hard"
+        lvl       = str(row.get("tourney_level", "A") or "A")
+        date      = row["tourney_date"]
+        year      = date.year if pd.notna(date) else None
+        draw      = int(row.get("draw_size") or 0)
+        tourney_id    = str(row.get("tourney_id", "") or "")
+        current_round = _round_n(row.get("round", ""))
 
         # Regresión de año nuevo
         if year and current_year and year > current_year:
@@ -280,8 +339,8 @@ def build_training_features(
             l_matches_log = _safe_log(match_count[l_id][surf])
 
             # Estadísticas de saque pre-partido (sin look-ahead)
-            w_sf = _serve_feats(w_id)
-            l_sf = _serve_feats(l_id)
+            w_sf = _serve_feats(w_id, surf)
+            l_sf = _serve_feats(l_id, surf)
             serve_diff = {
                 "first_serve_in_pct_diff":  w_sf["first_serve_in_pct"]  - l_sf["first_serve_in_pct"],
                 "first_serve_win_pct_diff": w_sf["first_serve_win_pct"] - l_sf["first_serve_win_pct"],
@@ -289,6 +348,57 @@ def build_training_features(
                 "ace_rate_diff":            w_sf["ace_rate"]              - l_sf["ace_rate"],
             }
             serve_diff_inv = {k: -v for k, v in serve_diff.items()}
+
+            # Días de descanso de cada jugador antes de este partido
+            _td = pd.Timedelta(days=1)
+            if w_id in last_match_date and pd.notna(last_match_date[w_id]):
+                w_days = min(int((date - last_match_date[w_id]) / _td), _REST_CAP)
+            else:
+                w_days = 0
+            if l_id in last_match_date and pd.notna(last_match_date[l_id]):
+                l_days = min(int((date - last_match_date[l_id]) / _td), _REST_CAP)
+            else:
+                l_days = 0
+
+            # Fatiga intratorneo: último partido en ESTE torneo
+            _td1 = pd.Timedelta(days=1)
+            def _t_days(pid: int) -> int:
+                key = (pid, tourney_id)
+                if key not in tourney_state or not pd.notna(tourney_state[key][0]):
+                    return 0
+                return max(0, int((date - tourney_state[key][0]) / _td1))
+            def _t_sets(pid: int) -> int:
+                key = (pid, tourney_id)
+                return tourney_state[key][1] if key in tourney_state else 0
+            def _t_rounds_back(pid: int) -> int:
+                key = (pid, tourney_id)
+                if key not in tourney_state or current_round == 0:
+                    return current_round   # primer partido: lleva todo el torneo desde el inicio
+                return current_round - tourney_state[key][2]
+
+            w_t_days  = _t_days(w_id)
+            l_t_days  = _t_days(l_id)
+            w_t_sets  = _t_sets(w_id)
+            l_t_sets  = _t_sets(l_id)
+            w_t_rounds = _t_rounds_back(w_id)
+            l_t_rounds = _t_rounds_back(l_id)
+
+            # Rankings históricos del CSV Sackmann (disponibles en entrenamiento)
+            def _safe_rank(v) -> float:
+                try:
+                    r = float(v)
+                    return r if r > 0 else 0.0
+                except (TypeError, ValueError):
+                    return 0.0
+            w_rank = _safe_rank(row.get("winner_rank"))
+            l_rank = _safe_rank(row.get("loser_rank"))
+            # Si ambos ranks son válidos: calcular diferencia logarítmica real
+            # Fila A (ganador=p1): positivo porque el ganador suele estar mejor rankeado
+            # Fila B (perdedor=p1): se niega — ver abajo
+            if w_rank > 0 and l_rank > 0:
+                rdl_winner_as_p1 = _safe_log(l_rank) - _safe_log(w_rank)
+            else:
+                rdl_winner_as_p1 = 0.0   # ranking no disponible para este partido
 
             is_clay = 1 if surf == "Clay"  else 0
             is_grs  = 1 if surf == "Grass" else 0
@@ -301,7 +411,7 @@ def build_training_features(
                 "is_grass":       is_grs,
                 "is_grand_slam":  is_gs,
                 "is_masters":     is_m,
-                "ranking_diff_log": 0.0,   # no disponible en training histórico
+                # ranking_diff_log se añade individualmente a cada fila (signo opuesto)
                 "surface":        surf,
                 "tourney_level":  lvl,
                 "tourney_date":   date,
@@ -317,6 +427,11 @@ def build_training_features(
                 "form_diff":         w_form - l_form,
                 "form_surface_diff": w_form_s - l_form_s,
                 "p1_matches_log":    w_matches_log,
+                "ranking_diff_log":  rdl_winner_as_p1,
+                "rest_advantage_diff":  float(w_days - l_days),
+                "p1_returning":         1.0 if w_days > _REST_THRESHOLD else 0.0,
+                "p1_sets_last_match":   float(w_t_sets),
+                "tourney_rounds_rest_diff": float(w_t_rounds - l_t_rounds),
                 "target": 1,
                 **serve_diff,
                 **base,
@@ -333,6 +448,11 @@ def build_training_features(
                 "form_diff":         l_form - w_form,
                 "form_surface_diff": l_form_s - w_form_s,
                 "p1_matches_log":    l_matches_log,
+                "ranking_diff_log":  -rdl_winner_as_p1,
+                "rest_advantage_diff":  float(l_days - w_days),
+                "p1_returning":         1.0 if l_days > _REST_THRESHOLD else 0.0,
+                "p1_sets_last_match":   float(l_t_sets),
+                "tourney_rounds_rest_diff": float(l_t_rounds - w_t_rounds),
                 "target": 0,
                 **serve_diff_inv,
                 **base,
@@ -365,17 +485,32 @@ def build_training_features(
             except: return 0
         w_svpt = _si(row.get("w_svpt"));  l_svpt = _si(row.get("l_svpt"))
         if w_svpt > 0:
-            serve_stats[w_id].append((
+            w_entry = (
                 w_svpt, _si(row.get("w_1stIn")), _si(row.get("w_1stWon")),
                 _si(row.get("w_bpSaved")), _si(row.get("w_bpFaced")),
                 _si(row.get("w_ace")),
-            ))
+            )
+            serve_stats[(w_id, surf)].append(w_entry)
+            serve_stats[(w_id, "all")].append(w_entry)
         if l_svpt > 0:
-            serve_stats[l_id].append((
+            l_entry = (
                 l_svpt, _si(row.get("l_1stIn")), _si(row.get("l_1stWon")),
                 _si(row.get("l_bpSaved")), _si(row.get("l_bpFaced")),
                 _si(row.get("l_ace")),
-            ))
+            )
+            serve_stats[(l_id, surf)].append(l_entry)
+            serve_stats[(l_id, "all")].append(l_entry)
+
+        # Última fecha de partido (actualizar después de registrar features)
+        if pd.notna(date):
+            last_match_date[w_id] = date
+            last_match_date[l_id] = date
+
+        # Fatiga intratorneo (actualizar después de registrar features)
+        if pd.notna(date) and tourney_id:
+            n_sets = _count_sets(str(row.get("score", "") or ""))
+            tourney_state[(w_id, tourney_id)] = (date, n_sets, current_round)
+            tourney_state[(l_id, tourney_id)] = (date, n_sets, current_round)
 
     if not records:
         return pd.DataFrame()
@@ -401,10 +536,12 @@ def _compute_serve_stats_from_history(
     matches_df: pd.DataFrame,
     window: int = _SERVE_WINDOW,
     as_of_date=None,
+    surface: Optional[str] = None,
 ) -> Dict[str, float]:
     """
     Calcula rolling serve stats de un jugador a partir del historial de partidos.
-    Combina partidos ganados (w_*) y perdidos (l_*) — el saque no depende del resultado.
+    Si se pasa `surface` y hay ≥ _SURF_SERVE_MIN partidos en esa superficie, usa esas stats;
+    si no, cae hacia el pool global.
     """
     if matches_df.empty:
         return dict(_SERVE_ATP_AVG)
@@ -415,14 +552,24 @@ def _compute_serve_stats_from_history(
     if not all(c in mdf.columns for c in needed_w):
         return dict(_SERVE_ATP_AVG)
 
-    won_df  = mdf[mdf["winner_id"] == pid][needed_w].copy()
-    won_df.columns = ["tourney_date", "svpt", "1stIn", "1stWon", "bpSaved", "bpFaced", "ace"]
-    lost_df = mdf[mdf["loser_id"]  == pid][needed_l].copy()
-    lost_df.columns = ["tourney_date", "svpt", "1stIn", "1stWon", "bpSaved", "bpFaced", "ace"]
+    def _build_combined(df: pd.DataFrame) -> pd.DataFrame:
+        won  = df[df["winner_id"] == pid][needed_w].copy()
+        won.columns  = ["tourney_date", "svpt", "1stIn", "1stWon", "bpSaved", "bpFaced", "ace"]
+        lost = df[df["loser_id"]  == pid][needed_l].copy()
+        lost.columns = ["tourney_date", "svpt", "1stIn", "1stWon", "bpSaved", "bpFaced", "ace"]
+        combined = pd.concat([won, lost]).sort_values("tourney_date").tail(window)
+        combined = combined.apply(pd.to_numeric, errors="coerce").fillna(0)
+        return combined[combined["svpt"] > 0]
 
-    combined = pd.concat([won_df, lost_df]).sort_values("tourney_date").tail(window)
-    combined = combined.apply(pd.to_numeric, errors="coerce").fillna(0)
-    combined = combined[combined["svpt"] > 0]
+    # Intentar stats específicas de superficie
+    if surface and "surface" in mdf.columns:
+        surf_combined = _build_combined(mdf[mdf["surface"] == surface])
+        if len(surf_combined) >= _SURF_SERVE_MIN:
+            combined = surf_combined
+        else:
+            combined = _build_combined(mdf)   # fallback al pool global
+    else:
+        combined = _build_combined(mdf)
 
     if len(combined) < 3:
         return dict(_SERVE_ATP_AVG)
@@ -441,7 +588,77 @@ def _compute_serve_stats_from_history(
     }
 
 
+# ── Rest days helper ─────────────────────────────────────────────────────────
+
+_REST_CAP_LIVE = 60
+_REST_THRESHOLD_LIVE = 30
+
+
+def _compute_rest_features(
+    p1_id: int,
+    p2_id: int,
+    matches_df: pd.DataFrame,
+    as_of_date=None,
+) -> Dict[str, float]:
+    """Calcula rest_advantage_diff y p1_returning a partir del historial."""
+    if matches_df.empty or "winner_id" not in matches_df.columns:
+        return {"rest_advantage_diff": 0.0, "p1_returning": 0.0}
+
+    mdf = matches_df if as_of_date is None else matches_df[matches_df["tourney_date"] < as_of_date]
+    ref_date = pd.Timestamp(as_of_date) if as_of_date is not None else pd.Timestamp.today()
+
+    def _days(pid: int) -> int:
+        played = mdf[(mdf["winner_id"] == pid) | (mdf["loser_id"] == pid)]
+        if played.empty:
+            return 0
+        last = pd.Timestamp(played["tourney_date"].max())
+        delta = (ref_date - last).days
+        return min(max(0, int(delta)), _REST_CAP_LIVE)
+
+    p1_days = _days(p1_id)
+    p2_days = _days(p2_id)
+    return {
+        "rest_advantage_diff": float(p1_days - p2_days),
+        "p1_returning":        1.0 if p1_days > _REST_THRESHOLD_LIVE else 0.0,
+    }
+
+
 # ── Features para predicción en tiempo real ───────────────────────────────────
+
+def _compute_tourney_fatigue(
+    p1_id: int,
+    p2_id: int,
+    tourney_id: Optional[str],
+    matches_df: pd.DataFrame,
+    current_round: Optional[str] = None,
+    as_of_date=None,
+) -> Dict[str, float]:
+    """Fatiga intratorneo: sets y rondas desde último partido en este torneo."""
+    if not tourney_id or matches_df.empty or "tourney_id" not in matches_df.columns:
+        return {"p1_sets_last_match": 0.0, "tourney_rounds_rest_diff": 0.0}
+
+    mdf = matches_df if as_of_date is None else matches_df[matches_df["tourney_date"] < as_of_date]
+    tmatch = mdf[mdf["tourney_id"].astype(str) == str(tourney_id)]
+    cur_round_n = _round_n(current_round)
+
+    def _prev_match(pid: int):
+        pm = tmatch[(tmatch["winner_id"] == pid) | (tmatch["loser_id"] == pid)]
+        if pm.empty:
+            return 0, cur_round_n   # no prev match → (sets=0, rounds_back=full tournament depth)
+        last_row = pm.loc[pm.index[-1]] if "round" not in pm.columns else \
+                   pm.sort_values(lambda r: r["round"].map(_ROUND_ORDER).fillna(0)).iloc[-1]
+        n_sets   = _count_sets(str(last_row.get("score", "") or ""))
+        last_r   = _round_n(last_row.get("round", ""))
+        rounds_back = cur_round_n - last_r if (cur_round_n > 0 and last_r > 0) else 0
+        return n_sets, rounds_back
+
+    p1_sets, p1_rounds = _prev_match(p1_id)
+    p2_sets, p2_rounds = _prev_match(p2_id)
+    return {
+        "p1_sets_last_match":      float(p1_sets),
+        "tourney_rounds_rest_diff": float(p1_rounds - p2_rounds),
+    }
+
 
 def compute_live_features(
     p1_id: int,
@@ -452,6 +669,8 @@ def compute_live_features(
     rankings: Dict[int, int],
     matches_df: pd.DataFrame,
     as_of_date: Optional[pd.Timestamp] = None,
+    tourney_id: Optional[str] = None,
+    tourney_round: Optional[str] = None,
 ) -> Dict[str, float]:
     """
     Computa las features para un partido en tiempo real.
@@ -525,8 +744,8 @@ def compute_live_features(
     ranking_diff_log = _safe_log(p2_rank) - _safe_log(p1_rank)
 
     # ── Estadísticas de saque ─────────────────────────────────────────────────
-    p1_serve = _compute_serve_stats_from_history(p1_id, matches_df, as_of_date=as_of_date)
-    p2_serve = _compute_serve_stats_from_history(p2_id, matches_df, as_of_date=as_of_date)
+    p1_serve = _compute_serve_stats_from_history(p1_id, matches_df, as_of_date=as_of_date, surface=surf)
+    p2_serve = _compute_serve_stats_from_history(p2_id, matches_df, as_of_date=as_of_date, surface=surf)
 
     return {
         "elo_diff":                  elo_diff,
@@ -546,4 +765,8 @@ def compute_live_features(
         "first_serve_win_pct_diff":  p1_serve["first_serve_win_pct"] - p2_serve["first_serve_win_pct"],
         "bp_save_rate_diff":         p1_serve["bp_save_rate"]         - p2_serve["bp_save_rate"],
         "ace_rate_diff":             p1_serve["ace_rate"]              - p2_serve["ace_rate"],
+        # Descanso y retorno de ausencia
+        **_compute_rest_features(p1_id, p2_id, matches_df, as_of_date),
+        # Fatiga intratorneo
+        **_compute_tourney_fatigue(p1_id, p2_id, tourney_id, matches_df, tourney_round, as_of_date),
     }

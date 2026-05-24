@@ -1,10 +1,10 @@
-Model          : atp_model_v2 (StackingClassifier XGB+RF+LR)
-Features       : 17 (elo_diff, elo_win_prob, h2h_win_rate, h2h_surface_rate, h2h_total_log, form_diff, form_surface_diff, is_clay, is_grass, is_grand_slam, is_masters, ranking_diff_log, p1_matches_log, first_serve_in_pct_diff, first_serve_win_pct_diff, bp_save_rate_diff, ace_rate_diff)
+Model          : atp_model_v3 (StackingClassifier XGB+RF+LR)
+Features       : 21 (elo_diff, elo_win_prob, h2h_win_rate, h2h_surface_rate, h2h_total_log, form_diff, form_surface_diff, is_clay, is_grass, is_grand_slam, is_masters, ranking_diff_log, p1_matches_log, first_serve_in_pct_diff, first_serve_win_pct_diff, bp_save_rate_diff, ace_rate_diff, rest_advantage_diff, p1_returning, p1_sets_last_match, tourney_rounds_rest_diff)
 Train data     : 2013–2025 | Eval split: 2013–2024 train / 2025 val
 Elo warmup     : 2010–2026 (incluye 2026 parcial)
-Train accuracy : 0.671
-Train ROC-AUC  : 0.7405
-Val   accuracy : 0.6404
-Val   ROC-AUC  : 0.6935
-Val   Brier    : 0.2211
-Val   log_loss : 0.6312
+Train accuracy : 0.7798
+Train ROC-AUC  : 0.8807
+Val   accuracy : 0.8144
+Val   ROC-AUC  : 0.9064
+Val   Brier    : 0.1254
+Val   log_loss : 0.3894
