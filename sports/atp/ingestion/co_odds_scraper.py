@@ -145,6 +145,12 @@ def _fetch_kambi_atp(
         tourney   = ev.get("group", "ATP")
         state     = ev.get("state", "")   # "NOT_STARTED", "STARTED", "FINISHED"
 
+        # Excluir partidos femeninos / WTA (el grupo Grand Slam mezcla géneros)
+        _tourney_lower = tourney.lower()
+        if any(kw in _tourney_lower for kw in ("femenin", "women", "wta", "ladies", "feminine")):
+            logger.debug("%s: omitiendo evento femenino '%s'", bookmaker_name, tourney)
+            continue
+
         # Filtrar por fecha si se especificó
         try:
             dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))

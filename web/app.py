@@ -52,6 +52,37 @@ _SNAPSHOTS_DIR = os.path.join(_BASE_DIR, "output", "snapshots")
 _TEAMS_MAP: dict[int, str] = {t["id"]: t["full_name"] for t in nba_teams_static.get_teams()}
 
 
+def _run_today_pipeline_if_missed() -> None:
+    """
+    Ejecuta el pipeline de hoy si el cron de las 6 AM no pudo correr
+    porque el computador estaba apagado.
+
+    Condiciones para ejecutar:
+      - No existe el snapshot de hoy en output/snapshots/{hoy}.json
+      - La hora actual es >= 6:00 AM (para no correr de madrugada)
+    """
+    import time as _time_mod
+    today_str     = _date_cls.today().isoformat()
+    snapshot_path = os.path.join(_SNAPSHOTS_DIR, f"{today_str}.json")
+
+    if os.path.exists(snapshot_path):
+        logger.info("Startup catch-up: pipeline de hoy ya ejecutado (%s), saltando.", today_str)
+        return
+
+    if datetime.now().hour < 6:
+        logger.info("Startup catch-up: antes de las 6 AM, omitiendo ejecución automática.")
+        return
+
+    logger.info("Startup catch-up: pipeline de %s no encontrado — ejecutando ahora…", today_str)
+    try:
+        data = _run_pipeline(today_str)
+        _CACHE[today_str] = {"data": data, "ts": _time_mod.time()}
+        _save_snapshot(today_str, data)
+        logger.info("Startup catch-up: pipeline de %s completado.", today_str)
+    except Exception as exc:
+        logger.warning("Startup catch-up: pipeline falló: %s", exc)
+
+
 @app.on_event("startup")
 async def _startup_preload() -> None:
     """Pre-carga stats de equipo y reconcilia resultados pasados en background."""
@@ -60,7 +91,8 @@ async def _startup_preload() -> None:
     loop.run_in_executor(None, _get_team_stats_cached)
     loop.run_in_executor(None, _fetch_and_reconcile_results)
     loop.run_in_executor(None, _fetch_and_reconcile_atp_results)
-    logger.info("Startup: pre-carga de team stats y reconciliación NBA+ATP lanzadas en background")
+    loop.run_in_executor(None, _run_today_pipeline_if_missed)
+    logger.info("Startup: pre-carga de team stats, reconciliación NBA+ATP y catch-up pipeline lanzados en background")
 
 _CACHE: dict[str, dict] = {}   # key: date_str -> {"data": ..., "ts": float}
 _CACHE_TTL = 10 * 60           # 10 minutos — refresca cuotas y predicciones automáticamente
@@ -278,6 +310,67 @@ def _best_action(game: dict) -> dict:
     }
 
 
+def _save_predictions_csv(games_df: "pd.DataFrame", predictions_df: "pd.DataFrame", date_str: str) -> None:
+    """
+    Persiste en output/predictions.csv las predicciones generadas por el pipeline web.
+    Garantiza que el backtest y la reconciliación siempre tengan el home_team_id disponible,
+    aunque el pipeline haya corrido desde el dashboard y no desde run_pipeline.py.
+    Solo añade filas nuevas — no sobreescribe filas existentes con el mismo game_id.
+    """
+    pred_path = os.path.join(_BASE_DIR, "output", "predictions.csv")
+    model_ver = os.environ.get("MODEL_VERSION", "?")
+
+    # Construir el dataframe a guardar fusionando games + predictions
+    save_rows: list[dict] = []
+    for _, pred_row in predictions_df.iterrows():
+        gid = str(pred_row.get("game_id", ""))
+        if not gid:
+            continue
+        game_row = games_df[games_df["game_id"].astype(str) == gid]
+        home_team_id    = str(int(game_row["home_team_id"].iloc[0]))    if not game_row.empty else ""
+        visitor_team_id = str(int(game_row["visitor_team_id"].iloc[0])) if not game_row.empty else ""
+        save_rows.append({
+            "game_id":           gid,
+            "game_date":         date_str,
+            "home_team_id":      home_team_id,
+            "visitor_team_id":   visitor_team_id,
+            "home_win_prob":     pred_row.get("home_win_prob", ""),
+            "away_win_prob":     pred_row.get("away_win_prob", ""),
+            "predicted_winner":  pred_row.get("predicted_winner", ""),
+            "model_version":     pred_row.get("model_version", model_ver),
+            "fetch_date":        date_str,
+            "home_injury_pts":   pred_row.get("home_injury_pts", ""),
+            "visitor_injury_pts": pred_row.get("visitor_injury_pts", ""),
+            "injury_adjustment": pred_row.get("injury_adjustment", ""),
+            "mc_home_win_prob":  pred_row.get("mc_home_win_prob", ""),
+            "mc_spread":         pred_row.get("mc_spread", ""),
+            "mc_spread_std":     pred_row.get("mc_spread_std", ""),
+            "mc_total":          pred_row.get("mc_total", ""),
+            "mc_over_225_prob":  pred_row.get("mc_over_225_prob", ""),
+            "mc_confidence":     pred_row.get("mc_confidence", ""),
+            "mc_blend_prob":     pred_row.get("mc_blend_prob", ""),
+            "home_win":          "",
+        })
+
+    if not save_rows:
+        return
+
+    new_df = pd.DataFrame(save_rows).astype(str)
+
+    if os.path.exists(pred_path):
+        existing = pd.read_csv(pred_path, dtype=str)
+        existing_ids = set(existing["game_id"].astype(str))
+        new_only = new_df[~new_df["game_id"].isin(existing_ids)]
+        if new_only.empty:
+            return
+        combined = pd.concat([existing, new_only], ignore_index=True)
+    else:
+        combined = new_df
+
+    combined.to_csv(pred_path, index=False)
+    logger.info("predictions.csv: %d nuevas filas guardadas para %s", len(save_rows), date_str)
+
+
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
 def _run_pipeline(date_str: str) -> dict:
@@ -360,6 +453,13 @@ def _run_pipeline(date_str: str) -> dict:
         )
     except Exception as exc:
         logger.debug("No se pudo lanzar hilo de persistencia: %s", exc)
+
+    # 7. Guardar en predictions.csv para que reconcile y backtest puedan cruzar resultados
+    if not predictions_df.empty:
+        try:
+            _save_predictions_csv(games_df, predictions_df, date_str)
+        except Exception as exc:
+            logger.warning("No se pudo guardar predictions.csv: %s", exc)
 
     return _build_response(date_str, games_df, predictions_df, odds_df, value_bets_df)
 
@@ -761,7 +861,10 @@ def _fetch_atp_completed_from_espn(pending_dates: list) -> list[dict]:
                     if c.get("winner"):
                         winner_name = name
                 if winner_name and len(player_names) == 2:
-                    results.append({"player1": player_names[0], "player2": player_names[1], "winner": winner_name})
+                    # Extraer fecha del partido para filtrado por fecha en _apply_results
+                    raw_date = comp.get("date", "") or event.get("date", "")
+                    match_date = raw_date[:10] if raw_date else ""
+                    results.append({"player1": player_names[0], "player2": player_names[1], "winner": winner_name, "date": match_date})
 
     logger.info("ATP reconcile: %d Men's Singles completados desde ESPN para %s", len(results), query_date)
     return results
@@ -836,16 +939,26 @@ def _fetch_and_reconcile_atp_results() -> int:
         return False
 
     def _apply_results(src_records: list[dict], target_df: "pd.DataFrame") -> int:
-        """Aplica resultados de una lista [{player1, player2, winner}] al journal."""
+        """Aplica resultados de una lista [{player1, player2, winner, date?}] al journal."""
         count = 0
         for idx in target_df.index:
             row       = jdf.loc[idx]
             predicted = str(row.get("predicted_player", "")).strip()
             opponent  = str(row.get("opponent",         "")).strip()
+            bet_date  = str(row.get("game_date",         "")).strip()[:10]
             if not predicted:
                 continue
             for rec in src_records:
                 p1, p2, winner = rec["player1"], rec["player2"], rec["winner"]
+                # Filtrar por fecha: solo aceptar resultado del mismo día ±2 días
+                rec_date = rec.get("date", "")
+                if rec_date and bet_date:
+                    try:
+                        delta = abs((_date_cls.fromisoformat(rec_date) - _date_cls.fromisoformat(bet_date)).days)
+                        if delta > 2:
+                            continue
+                    except ValueError:
+                        pass  # si el formato falla, no filtrar por fecha
                 if not (_names_match(predicted, p1) or _names_match(predicted, p2)):
                     continue
                 if not (_names_match(opponent, p1) or _names_match(opponent, p2)):
@@ -898,6 +1011,7 @@ def _fetch_and_reconcile_atp_results() -> int:
                     "player1": scores[0]["name"],
                     "player2": scores[1]["name"],
                     "winner":  scores[0]["name"] if s0 > s1 else scores[1]["name"],
+                    "date":    event.get("commence_time", "")[:10],
                 })
             if odds_records:
                 updated += _apply_results(odds_records, still_pending_df)
@@ -1470,7 +1584,11 @@ def get_backtest(bankroll: float = Query(default=500_000), period: str = Query(d
             if len(grp) < 2:
                 continue
             winner_tid = int(grp.loc[grp["pts"].idxmax(), "team_id"])
-            actual_winner[gid_str] = "home" if winner_tid == home_map.get(gid_str, -1) else "away"
+            home_tid = home_map.get(gid_str)
+            if home_tid is not None:
+                actual_winner[gid_str] = "home" if winner_tid == home_tid else "away"
+            # Si home_tid es None el game_id no está en predictions.csv →
+            # no registrar resultado para evitar falsos positivos/negativos.
             actual_totals[gid_str] = float(grp["pts"].sum())
 
     # Enriquecer con resultados de Supabase (tienen prioridad si estan disponibles)
@@ -1893,7 +2011,10 @@ def get_atp_backtest(bankroll: float = Query(default=500_000), period: str = Que
             pl      = None
             status  = "pending"
         else:
-            correct = (correct_raw == "1")
+            try:
+                correct = (int(float(correct_raw)) == 1)
+            except (ValueError, TypeError):
+                correct = False
             if pl_raw and pl_raw not in ("nan", ""):
                 pl = round(float(pl_raw))
             else:

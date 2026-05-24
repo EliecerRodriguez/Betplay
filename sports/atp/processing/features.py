@@ -6,7 +6,7 @@ ENTRENAMIENTO (con loop progresivo sin look-ahead bias) como para
 PREDICCIÓN en tiempo real.
 
 ──────────────────────────────────────────────────────────────────────
-FEATURES INCLUIDAS (13 features finales)
+FEATURES INCLUIDAS (17 features finales)
 ──────────────────────────────────────────────────────────────────────
 Elo (los más predictivos en tenis):
   1.  elo_diff          p1_elo - p2_elo en la superficie del partido
@@ -54,7 +54,7 @@ FUNCIONES PRINCIPALES
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -92,7 +92,20 @@ FEATURE_COLUMNS: List[str] = [
     "ranking_diff_log",
     # Experiencia en superficie
     "p1_matches_log",
+    # Estadísticas de saque (rolling últimos 20 partidos)
+    "first_serve_in_pct_diff",
+    "first_serve_win_pct_diff",
+    "bp_save_rate_diff",
+    "ace_rate_diff",
 ]
+
+_SERVE_WINDOW = 20   # rolling window para stats de saque
+_SERVE_ATP_AVG: Dict[str, float] = {   # promedios ATP circuit (imputación cuando no hay historia)
+    "first_serve_in_pct":  0.62,
+    "first_serve_win_pct": 0.73,
+    "bp_save_rate":        0.63,
+    "ace_rate":            0.06,
+}
 
 
 def get_feature_columns() -> List[str]:
@@ -173,6 +186,28 @@ def build_training_features(
         lambda: defaultdict(int)
     )
 
+    # Stats de saque rolling: {player_id: deque[(svpt, 1stIn, 1stWon, bpSaved, bpFaced, ace)]}
+    serve_stats: Dict[int, deque] = defaultdict(
+        lambda: deque(maxlen=_SERVE_WINDOW)
+    )
+
+    def _serve_feats(pid: int) -> Dict[str, float]:
+        hist = list(serve_stats[pid])
+        if len(hist) < 3:
+            return dict(_SERVE_ATP_AVG)
+        svpt  = sum(h[0] for h in hist)
+        f1in  = sum(h[1] for h in hist)
+        f1won = sum(h[2] for h in hist)
+        bps   = sum(h[3] for h in hist)
+        bpf   = sum(h[4] for h in hist)
+        ace   = sum(h[5] for h in hist)
+        return {
+            "first_serve_in_pct":  f1in  / svpt if svpt > 0 else 0.62,
+            "first_serve_win_pct": f1won / f1in  if f1in  > 0 else 0.73,
+            "bp_save_rate":        bps   / bpf   if bpf   > 0 else 0.63,
+            "ace_rate":            ace   / svpt  if svpt  > 0 else 0.06,
+        }
+
     def _elo(pid: int, surf: str) -> float:
         return elos[pid].get(surf, ELO_BASE)
 
@@ -244,6 +279,17 @@ def build_training_features(
             w_matches_log = _safe_log(match_count[w_id][surf])
             l_matches_log = _safe_log(match_count[l_id][surf])
 
+            # Estadísticas de saque pre-partido (sin look-ahead)
+            w_sf = _serve_feats(w_id)
+            l_sf = _serve_feats(l_id)
+            serve_diff = {
+                "first_serve_in_pct_diff":  w_sf["first_serve_in_pct"]  - l_sf["first_serve_in_pct"],
+                "first_serve_win_pct_diff": w_sf["first_serve_win_pct"] - l_sf["first_serve_win_pct"],
+                "bp_save_rate_diff":        w_sf["bp_save_rate"]         - l_sf["bp_save_rate"],
+                "ace_rate_diff":            w_sf["ace_rate"]              - l_sf["ace_rate"],
+            }
+            serve_diff_inv = {k: -v for k, v in serve_diff.items()}
+
             is_clay = 1 if surf == "Clay"  else 0
             is_grs  = 1 if surf == "Grass" else 0
             is_gs   = 1 if lvl == "G"      else 0
@@ -272,6 +318,7 @@ def build_training_features(
                 "form_surface_diff": w_form_s - l_form_s,
                 "p1_matches_log":    w_matches_log,
                 "target": 1,
+                **serve_diff,
                 **base,
             })
             # Fila B: perdedor = p1 (target=0)
@@ -287,6 +334,7 @@ def build_training_features(
                 "form_surface_diff": l_form_s - w_form_s,
                 "p1_matches_log":    l_matches_log,
                 "target": 0,
+                **serve_diff_inv,
                 **base,
             })
 
@@ -311,6 +359,24 @@ def build_training_features(
             match_count[pid]["all"] += 1
             match_count[pid][surf]  += 1
 
+        # Estadísticas de saque (actualizar después de registrar features)
+        def _si(v) -> int:
+            try: return max(0, int(float(v or 0)))
+            except: return 0
+        w_svpt = _si(row.get("w_svpt"));  l_svpt = _si(row.get("l_svpt"))
+        if w_svpt > 0:
+            serve_stats[w_id].append((
+                w_svpt, _si(row.get("w_1stIn")), _si(row.get("w_1stWon")),
+                _si(row.get("w_bpSaved")), _si(row.get("w_bpFaced")),
+                _si(row.get("w_ace")),
+            ))
+        if l_svpt > 0:
+            serve_stats[l_id].append((
+                l_svpt, _si(row.get("l_1stIn")), _si(row.get("l_1stWon")),
+                _si(row.get("l_bpSaved")), _si(row.get("l_bpFaced")),
+                _si(row.get("l_ace")),
+            ))
+
     if not records:
         return pd.DataFrame()
 
@@ -326,6 +392,53 @@ def build_training_features(
         len(result_df), len(result_df) // 2, min_year,
     )
     return result_df
+
+
+# ── Stats de saque para predicción en tiempo real ────────────────────────────
+
+def _compute_serve_stats_from_history(
+    pid: int,
+    matches_df: pd.DataFrame,
+    window: int = _SERVE_WINDOW,
+    as_of_date=None,
+) -> Dict[str, float]:
+    """
+    Calcula rolling serve stats de un jugador a partir del historial de partidos.
+    Combina partidos ganados (w_*) y perdidos (l_*) — el saque no depende del resultado.
+    """
+    if matches_df.empty:
+        return dict(_SERVE_ATP_AVG)
+    mdf = matches_df if as_of_date is None else matches_df[matches_df["tourney_date"] < as_of_date]
+
+    needed_w = ["tourney_date", "w_svpt", "w_1stIn", "w_1stWon", "w_bpSaved", "w_bpFaced", "w_ace"]
+    needed_l = ["tourney_date", "l_svpt", "l_1stIn", "l_1stWon", "l_bpSaved", "l_bpFaced", "l_ace"]
+    if not all(c in mdf.columns for c in needed_w):
+        return dict(_SERVE_ATP_AVG)
+
+    won_df  = mdf[mdf["winner_id"] == pid][needed_w].copy()
+    won_df.columns = ["tourney_date", "svpt", "1stIn", "1stWon", "bpSaved", "bpFaced", "ace"]
+    lost_df = mdf[mdf["loser_id"]  == pid][needed_l].copy()
+    lost_df.columns = ["tourney_date", "svpt", "1stIn", "1stWon", "bpSaved", "bpFaced", "ace"]
+
+    combined = pd.concat([won_df, lost_df]).sort_values("tourney_date").tail(window)
+    combined = combined.apply(pd.to_numeric, errors="coerce").fillna(0)
+    combined = combined[combined["svpt"] > 0]
+
+    if len(combined) < 3:
+        return dict(_SERVE_ATP_AVG)
+
+    svpt  = combined["svpt"].sum()
+    f1in  = combined["1stIn"].sum()
+    f1won = combined["1stWon"].sum()
+    bps   = combined["bpSaved"].sum()
+    bpf   = combined["bpFaced"].sum()
+    ace   = combined["ace"].sum()
+    return {
+        "first_serve_in_pct":  f1in  / svpt if svpt > 0 else 0.62,
+        "first_serve_win_pct": f1won / f1in  if f1in  > 0 else 0.73,
+        "bp_save_rate":        bps   / bpf   if bpf   > 0 else 0.63,
+        "ace_rate":            ace   / svpt  if svpt  > 0 else 0.06,
+    }
 
 
 # ── Features para predicción en tiempo real ───────────────────────────────────
@@ -411,18 +524,26 @@ def compute_live_features(
     p2_rank = rankings.get(p2_id, 500)
     ranking_diff_log = _safe_log(p2_rank) - _safe_log(p1_rank)
 
+    # ── Estadísticas de saque ─────────────────────────────────────────────────
+    p1_serve = _compute_serve_stats_from_history(p1_id, matches_df, as_of_date=as_of_date)
+    p2_serve = _compute_serve_stats_from_history(p2_id, matches_df, as_of_date=as_of_date)
+
     return {
-        "elo_diff":           elo_diff,
-        "elo_win_prob":       elo_prob,
-        "h2h_win_rate":       h2h_win_rate,
-        "h2h_surface_rate":   h2h_surface_rate,
-        "h2h_total_log":      _safe_log(h2h_total),
-        "form_diff":          form_diff,
-        "form_surface_diff":  form_surface_diff,
-        "is_clay":            1.0 if surf == "Clay"  else 0.0,
-        "is_grass":           1.0 if surf == "Grass" else 0.0,
-        "is_grand_slam":      1.0 if lvl == "G"      else 0.0,
-        "is_masters":         1.0 if lvl == "M"      else 0.0,
-        "ranking_diff_log":   ranking_diff_log,
-        "p1_matches_log":     p1_matches_log,
+        "elo_diff":                  elo_diff,
+        "elo_win_prob":              elo_prob,
+        "h2h_win_rate":              h2h_win_rate,
+        "h2h_surface_rate":          h2h_surface_rate,
+        "h2h_total_log":             _safe_log(h2h_total),
+        "form_diff":                 form_diff,
+        "form_surface_diff":         form_surface_diff,
+        "is_clay":                   1.0 if surf == "Clay"  else 0.0,
+        "is_grass":                  1.0 if surf == "Grass" else 0.0,
+        "is_grand_slam":             1.0 if lvl == "G"      else 0.0,
+        "is_masters":                1.0 if lvl == "M"      else 0.0,
+        "ranking_diff_log":          ranking_diff_log,
+        "p1_matches_log":            p1_matches_log,
+        "first_serve_in_pct_diff":   p1_serve["first_serve_in_pct"]  - p2_serve["first_serve_in_pct"],
+        "first_serve_win_pct_diff":  p1_serve["first_serve_win_pct"] - p2_serve["first_serve_win_pct"],
+        "bp_save_rate_diff":         p1_serve["bp_save_rate"]         - p2_serve["bp_save_rate"],
+        "ace_rate_diff":             p1_serve["ace_rate"]              - p2_serve["ace_rate"],
     }

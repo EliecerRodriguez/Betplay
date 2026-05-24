@@ -43,7 +43,7 @@ logger = get_logger(__name__)
 # ── Configuración ─────────────────────────────────────────────────────────────
 
 _ATP_MODEL_DIR    = os.getenv("ATP_MODEL_DIR", "sports/atp/models")
-_MODEL_FILENAME   = "atp_model_v1.joblib"
+_MODEL_FILENAME   = "atp_model_v2.joblib"
 _ELO_BLEND_WEIGHT = float(os.getenv("ATP_ELO_BLEND_WEIGHT", "0.4"))   # 40% Elo
 
 # Caché en memoria
