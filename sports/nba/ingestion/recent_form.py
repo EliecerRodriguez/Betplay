@@ -78,11 +78,13 @@ def get_team_form(
     Devuelve métricas de forma reciente del equipo ANTES de before_date.
 
     Returns dict con:
-      - recent_wpct_{n}:     W% en últimos n partidos
-      - recent_pts_scored_{n}: Pts promedio anotados
+      - recent_wpct_{n}:        W% en últimos n partidos
+      - recent_pts_scored_{n}:  Pts promedio anotados
       - recent_pts_allowed_{n}: Pts promedio recibidos
-      - rest_days:           Días desde el último partido (cap 10)
-      - is_b2b:              1 si jugó ayer (back-to-back)
+      - rest_days:              Días desde el último partido (cap 10)
+      - is_b2b:                 1 si jugó ayer (back-to-back)
+      - games_last_7d:          Partidos jugados en los últimos 7 días (densidad)
+      - games_last_14d:         Partidos jugados en los últimos 14 días (densidad)
     """
     defaults = {
         f"recent_wpct_{n}":      0.5,
@@ -90,6 +92,8 @@ def get_team_form(
         f"recent_pts_allowed_{n}": 100.0,
         "rest_days":             3.0,
         "is_b2b":                0,
+        "games_last_7d":         2,
+        "games_last_14d":        4,
     }
 
     log = _get_team_game_log(team_id, season)
@@ -111,13 +115,43 @@ def get_team_form(
     rest_days    = min((before_date - last_date).days, 10)
     is_b2b       = 1 if rest_days <= 1 else 0
 
+    # ── Densidad de agenda (fatiga acumulada) ──────────────────────────────
+    # Cuenta partidos en los últimos 7 y 14 días antes del partido actual.
+    # Más juegos en poco tiempo = mayor fatiga física acumulada.
+    cutoff_7d  = before_date - timedelta(days=7)
+    cutoff_14d = before_date - timedelta(days=14)
+    games_7d   = int((past["GAME_DATE"] >= cutoff_7d).sum())
+    games_14d  = int((past["GAME_DATE"] >= cutoff_14d).sum())
+
     return {
         f"recent_wpct_{n}":       round(float(wpct), 4),
         f"recent_pts_scored_{n}": round(float(pts_scored), 2),
         f"recent_pts_allowed_{n}":round(float(pts_allowed), 2),
         "rest_days":              float(rest_days),
         "is_b2b":                 int(is_b2b),
+        "games_last_7d":          games_7d,
+        "games_last_14d":         games_14d,
     }
+
+
+def get_season_wpct(team_id: int, before_date: date, season: str) -> Optional[float]:
+    """
+    Devuelve el win% acumulado de temporada hasta before_date.
+
+    Usa el caché de TeamGameLog ya descargado por get_team_form — cero API calls extra.
+    Devuelve None si hay menos de 5 partidos jugados (inicio de temporada,
+    o si el game log no está disponible todavía).
+
+    Propósito: hacer que la producción use el mismo w_pct punto-en-el-tiempo
+    que el entrenamiento computa con _compute_rolling_stats_for_training().
+    """
+    log = _get_team_game_log(team_id, season)
+    if log.empty:
+        return None
+    past = log[log["GAME_DATE"] < before_date]
+    if len(past) < 5 or not past["WON"].notna().any():
+        return None
+    return round(float(past["WON"].mean()), 4)
 
 
 def enrich_with_form(

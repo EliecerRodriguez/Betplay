@@ -57,6 +57,42 @@ logger = get_logger(__name__)
 MODEL_DIR     = os.getenv("MODEL_DIR", "models")
 MODEL_TYPE    = os.getenv("MODEL_TYPE", "xgboost")   # 'xgboost' | 'random_forest' | 'logistic' | 'ensemble'
 
+# ── Defaults semánticos para imputación cuando fallan APIs ───────────────────
+# El SimpleImputer del pipeline usa medianas del conjunto de entrenamiento,
+# pero ese imputer SOLO cubre NaN dentro de columnas que YA EXISTEN.
+# Si la columna no existe (fallo total de API), la añadimos aquí con el valor
+# más neutro posible para no introducir sesgo en la predicción.
+# Regla: diferenciales → 0.0 (neutral). Valores absolutos → promedio de liga.
+_FEATURE_DEFAULTS: dict[str, float] = {
+    # W% — 0.0 significa "nunca gana"; la media NBA es 0.500
+    "home_w_pct":               0.500,
+    "visitor_w_pct":            0.500,
+    "home_recent_wpct_5":       0.500,
+    "visitor_recent_wpct_5":    0.500,
+    # Puntos — promedio NBA ~112 ppg (temporada 2025-26)
+    "home_recent_pts_scored_5":    112.0,
+    "visitor_recent_pts_scored_5": 112.0,
+    "home_recent_pts_allowed_5":   112.0,
+    "visitor_recent_pts_allowed_5":112.0,
+    # Descanso — 0 días parece back-to-back; el promedio real es ~2.5 días
+    "home_rest_days":    2.5,
+    "visitor_rest_days": 2.5,
+    # Ventaja de local — siempre 1 (no hay partido neutral aquí)
+    "home_advantage": 1.0,
+    # Elo — 1500 es el rating base neutro de inicio de temporada
+    "home_elo_pre":      1500.0,
+    "visitor_elo_pre":   1500.0,
+    "elo_home_win_prob": 0.500,
+    # Clasificación — seed 8 es el medio de los 15 equipos por conferencia
+    "home_playoff_seed":    8.0,
+    "visitor_playoff_seed": 8.0,
+    # Net/advanced ratings — 0.0 equivale a equipo promedio de liga
+    "home_off_rating":  112.0,
+    "visitor_off_rating":112.0,
+    "home_def_rating":  112.0,
+    "visitor_def_rating":112.0,
+}
+
 
 def _latest_model_version() -> str:
     """Auto-detecta la versión más reciente disponible en MODEL_DIR."""
@@ -488,9 +524,9 @@ def predict(
         available = [c for c in feature_cols if c in feature_df.columns]
         missing   = [c for c in feature_cols if c not in feature_df.columns]
         if missing:
-            logger.warning("predict: columnas faltantes en feature_df: %s — se imputan con 0", missing)
+            logger.warning("predict: columnas faltantes en feature_df: %s — se imputan con defaults semánticos", missing)
             for col in missing:
-                feature_df[col] = 0.0
+                feature_df[col] = _FEATURE_DEFAULTS.get(col, 0.0)
 
         X = feature_df[feature_cols].astype(float)
         proba = pipeline.predict_proba(X)

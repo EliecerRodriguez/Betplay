@@ -45,6 +45,17 @@ _STATUS_WEIGHT = {
 # Estimado de: "Cada 1 PPG de diferencia ≈ 2-3% de win probability en partido individual"
 _PPG_TO_WIN_PCT = 0.004   # 1 PPG perdido → 0.4% de win prob (calibrado con datos NBA históricos)
 
+# Normalización ESPN → nba_api: ESPN usa abreviaturas distintas para 6 franquicias
+_ESPN_TO_NBA_ABBREV: Dict[str, str] = {
+    "GS":   "GSW",  # Golden State Warriors
+    "NO":   "NOP",  # New Orleans Pelicans
+    "NY":   "NYK",  # New York Knicks
+    "SA":   "SAS",  # San Antonio Spurs
+    "UTAH": "UTA",  # Utah Jazz
+    "WSH":  "WAS",  # Washington Wizards
+    "PHO":  "PHX",  # Phoenix Suns (alias histórico)
+}
+
 # Mapeo de abreviatura ESPN → nombre de equipo (para cruzar con nba_api)
 _ESPN_ABBREV_TO_NBA_NAME: Dict[str, str] = {
     "ATL": "Atlanta Hawks",    "BOS": "Boston Celtics",    "BKN": "Brooklyn Nets",
@@ -110,6 +121,7 @@ def get_injuries() -> Dict[str, List[dict]]:
             status_raw = (injury.get("status") or "").lower()
             comment   = injury.get("shortComment") or injury.get("longComment") or ""
             abbrev    = athlete.get("team", {}).get("abbreviation", "UNK")
+            abbrev    = _ESPN_TO_NBA_ABBREV.get(abbrev, abbrev)  # normalizar a abreviatura nba_api
 
             if abbrev == "UNK" or not abbrev:
                 continue
@@ -133,6 +145,11 @@ def get_player_ppg(season: str = "2025-26") -> Dict[str, float]:
     """
     Obtiene el PPG de todos los jugadores de la temporada via nba_api.
     Devuelve dict {player_name_lower: ppg}.
+
+    Usa LeagueDashPlayerStats (sin umbral de partidos mínimos) para incluir
+    también a jugadores con pocas apariciones antes de lesionarse.
+    Si un jugador no aparece en la temporada actual, se busca en la anterior
+    como referencia de su valor de mercado.
     Cacheado en memoria por sesión (no cambia durante el día).
     """
     cache_key = f"_ppg_cache_{season}"
@@ -140,23 +157,45 @@ def get_player_ppg(season: str = "2025-26") -> Dict[str, float]:
     if cached:
         return cached
 
-    try:
-        from nba_api.stats.endpoints import leagueleaders
+    def _fetch_season(s: str) -> Dict[str, float]:
+        from nba_api.stats.endpoints import leaguedashplayerstats
         time.sleep(0.6)
-        ll = leagueleaders.LeagueLeaders(
-            season=season,
-            per_mode48="PerGame",
-            stat_category_abbreviation="PTS",
+        stats = leaguedashplayerstats.LeagueDashPlayerStats(
+            season=s,
+            per_mode_detailed="PerGame",
             timeout=30,
         )
-        df = ll.get_data_frames()[0]
-        ppg_dict = {
-            row["PLAYER"].strip().lower(): float(row["PTS"])
+        df = stats.get_data_frames()[0]
+        if df.empty or "PLAYER_NAME" not in df.columns or "PTS" not in df.columns:
+            return {}
+        return {
+            row["PLAYER_NAME"].strip().lower(): float(row["PTS"])
             for _, row in df.iterrows()
-            if "PLAYER" in df.columns and "PTS" in df.columns
         }
-        globals()[cache_key] = ppg_dict
+
+    try:
+        ppg_dict = _fetch_season(season)
         logger.info("get_player_ppg: %d jugadores cargados para %s", len(ppg_dict), season)
+
+        # Fallback a temporada anterior para jugadores que no clasificaron
+        # (lesionados toda la temporada, rookies con pocos partidos, etc.)
+        if ppg_dict:
+            prev_year   = int(season.split("-")[0]) - 1
+            prev_season = f"{prev_year}-{str(prev_year + 1)[-2:]}"
+            try:
+                ppg_prev = _fetch_season(prev_season)
+                # Solo añadir jugadores que NO aparecen en la temporada actual
+                added = 0
+                for name, ppg in ppg_prev.items():
+                    if name not in ppg_dict:
+                        ppg_dict[name] = ppg
+                        added += 1
+                if added:
+                    logger.debug("get_player_ppg: +%d jugadores desde %s (temporada anterior)", added, prev_season)
+            except Exception:
+                pass  # el fallback es opcional; no bloquear si falla
+
+        globals()[cache_key] = ppg_dict
         return ppg_dict
     except Exception as exc:
         logger.warning("get_player_ppg falló: %s — usando PPG=0 para lesionados", exc)
@@ -180,14 +219,9 @@ def get_team_injury_impact(season: str = "2025-26") -> Dict[str, float]:
         for p in players:
             name_key = p["name"].strip().lower()
             ppg = ppg_map.get(name_key, 0.0)
-
-            # Fallback: buscar con nombre parcial (apellido)
-            if ppg == 0.0:
-                last_name = name_key.split()[-1] if " " in name_key else name_key
-                ppg = next(
-                    (v for k, v in ppg_map.items() if last_name in k),
-                    0.0,
-                )
+            # Sin fallback por apellido: demasiado propenso a falsos positivos
+            # (p.ej. "Day'Ron Sharpe" matcheando con otro jugador "Sharpe").
+            # Si el jugador no está en el mapa de PPG, aportaba 0 pts relevantes.
             p["ppg"] = round(ppg, 1)
             total_pts_lost += ppg * p["weight"]
 
@@ -233,9 +267,6 @@ def adjust_predictions(
         from nba_api.stats.static import teams as nba_teams_static
         all_teams = nba_teams_static.get_teams()
         nba_id_to_abbrev = {t["id"]: t["abbreviation"] for t in all_teams}
-        # ESPN usa algunas abreviaturas diferentes
-        _nba_to_espn = {"BKN": "BKN", "GS": "GSW", "NO": "NOP", "NY": "NYK",
-                        "SA": "SAS", "PHO": "PHX"}
     except Exception:
         logger.warning("adjust_predictions: no se pudo cargar teams map")
         return predictions_df

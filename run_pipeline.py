@@ -24,7 +24,8 @@ from sports.nba.ingestion.elo import apply_elos_to_games, load_current_elos
 from sports.nba.ingestion.injuries_client import adjust_predictions, get_team_injury_impact
 from sports.nba.ingestion.nba_client import get_daily_games, get_combined_team_stats, get_line_scores
 from sports.nba.ingestion.odds_client import get_odds
-from sports.nba.ingestion.recent_form import enrich_with_form
+from sports.nba.ingestion.recent_form import enrich_with_form, get_season_wpct
+from sports.nba.ingestion.standings_client import enrich_with_standings
 from sports.nba.ingestion.travel_client import enrich_with_travel
 from sports.nba.model.monte_carlo import enrich_predictions_with_mc
 from sports.nba.model.predictor import predict
@@ -79,12 +80,43 @@ def run(date_str: str) -> dict[str, pd.DataFrame]:
         logger.warning("enrich_with_form falló (%s) — sin forma reciente", exc)
         games_enriched = games_df
 
+    # 3b. Override point-in-time: ajusta w_pct en team_stats_df con el acumulado
+    #     real de temporada hasta hoy, usando el caché de game log de enrich_with_form.
+    #     Esto elimina la asimetría entre entrenamiento (rolling, punto-en-el-tiempo)
+    #     y producción (stats de API que pueden ser de toda la temporada completa).
+    if not team_stats_df.empty and not games_enriched.empty:
+        try:
+            all_team_ids: set[int] = set()
+            for col in ("home_team_id", "visitor_team_id"):
+                if col in games_enriched.columns:
+                    all_team_ids.update(games_enriched[col].dropna().astype(int).tolist())
+            pit_date = date.today()
+            patched = 0
+            for tid in all_team_ids:
+                wpct = get_season_wpct(tid, pit_date, NBA_SEASON)
+                if wpct is None:
+                    continue
+                mask = team_stats_df["team_id"].astype(int) == tid
+                if mask.any():
+                    team_stats_df.loc[mask, "w_pct"] = wpct
+                    patched += 1
+            logger.info("Point-in-time w_pct aplicado: %d/%d equipos actualizados", patched, len(all_team_ids))
+        except Exception as exc:
+            logger.warning("Point-in-time w_pct override falló (%s) — usando stats de API", exc)
+
     # 4. Viaje y jet lag
     logger.info("Enriqueciendo con datos de viaje y jet lag …")
     try:
         games_enriched = enrich_with_travel(games_enriched, NBA_SEASON)
     except Exception as exc:
         logger.warning("enrich_with_travel falló (%s) — sin features de viaje", exc)
+
+    # 4b. Contexto de temporada (clasificación)
+    logger.info("Enriqueciendo con contexto de clasificación …")
+    try:
+        games_enriched = enrich_with_standings(games_enriched, NBA_SEASON)
+    except Exception as exc:
+        logger.warning("enrich_with_standings falló (%s) — sin features de standings", exc)
 
     # 5. Elo
     try:
@@ -99,27 +131,6 @@ def run(date_str: str) -> dict[str, pd.DataFrame]:
     feature_df = build_features(games_enriched, team_stats_df) if not team_stats_df.empty else pd.DataFrame()
     if not feature_df.empty:
         feature_df["fetch_date"] = date_str
-
-    # 6b. Injury impact como feature de entrada al modelo (para modelos entrenados con él)
-    #     injury_impact_diff > 0 → visitante pierde más PPG → ventaja para el local
-    if not feature_df.empty:
-        try:
-            from nba_api.stats.static import teams as _nba_teams_static
-            _all_teams    = _nba_teams_static.get_teams()
-            _id_to_abbrev = {t["id"]: t["abbreviation"] for t in _all_teams}
-            _impact       = get_team_injury_impact(NBA_SEASON)
-
-            def _ppg_lost(team_id) -> float:
-                abbrev = _id_to_abbrev.get(int(team_id or 0), "")
-                return _impact.get(abbrev, 0.0)
-
-            feature_df["injury_impact_diff"] = feature_df.apply(
-                lambda r: _ppg_lost(r.get("visitor_team_id", 0)) - _ppg_lost(r.get("home_team_id", 0)),
-                axis=1,
-            )
-        except Exception as exc:
-            logger.debug("Injury feature para predicción no disponible: %s", exc)
-            feature_df["injury_impact_diff"] = 0.0
 
     # 7. Predicciones
     logger.info("Generando predicciones …")

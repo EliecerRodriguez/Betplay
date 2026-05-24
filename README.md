@@ -87,48 +87,56 @@ Salida en `output/`:
 ### Reentrenar el modelo ATP (cada temporada)
 
 ```powershell
-python build_elos.py --start-year 2010              # actualizar Elos (una vez por temporada)
-python build_atp_model.py --force                   # re-entrenar (usa defaults: train hasta 2025, val 2024)
+python build_elos.py --start-year 2010              # actualizar Elos (descarga hasta 2026 por defecto)
+python build_atp_model.py --force                   # re-entrenar v2 (train 2013-2025, eval honesta 2024/2025)
 ```
 
-> Para incluir datos del año más reciente, primero borra el caché viejo y re-entrena:
+> Para incluir datos del año más reciente, borra el caché del año y re-entrena:
 > ```powershell
 > Remove-Item data\atp_cache\atp_matches_2026.csv   # fuerza re-descarga desde Sackmann
-> python build_atp_model.py --force --train-until 2025 --val-year 2024
+> python build_atp_model.py --force
 > ```
 
-Modelo guardado en `sports/atp/models/atp_model_v1.joblib`.
+Modelo guardado en `sports/atp/models/atp_model_v2.joblib`.
 
 ---
 
-## Rutina SEMANAL (cada 1-2 semanas, preferiblemente lunes)
+## Reentrenamiento del modelo NBA — cuándo y cómo
 
-### 1. Reentrenar el modelo
+### Frecuencia recomendada
+
+| Momento | Acción |
+|---|---|
+| **Resto de playoffs 2025-26** (hasta ~Jun 15) | ❌ No reentrenar — solo ~15-20 partidos más, ganancia mínima |
+| **Tras las Finales NBA** (Jun-Sep 2026) | ✅ Reentrenar con toda la temporada completa (~900-1000 partidos) |
+| **Inicio temporada 2026-27** (Oct 2026) | ✅ Reentrenar obligatorio con `--season 2026-27` |
+| **Durante temporada regular** | Cada 4-6 semanas para refrescar la ventana de 90 días |
+
+### Comando para reentrenar
 
 ```powershell
 cd C:\Betplay
 .\.venv\Scripts\Activate.ps1
 $env:PYTHONPATH = "C:\Betplay"
-python train_model.py --start-date 2021-10-19 --end-date 19 --season 2024-26 --model stacking --with-form --with-travel --version v10
+# Post-Finales: usa 180 días para cubrir toda la temporada
+python train_model.py --version v11 --days 180 --with-form --with-travel --model stacking
 ```
 
-Reemplazar `AYER` con la fecha real (ej. `2026-05-25`) y `vN` con la siguiente versión (v10, v11…).
+Reemplazar `v11` por la siguiente versión disponible.
 
 El modelo se entrena con:
 - **Stats punto-en-el-tiempo** — rolling window por equipo (sin look-ahead bias)
-- **Impacto de lesiones** — `injury_impact_diff` calculado desde `LeagueGameLog` histórico
+- **Features de clasificación** — standings (seed, games_back) desde `LeagueStandingsV3`
+- **Sin injury_impact_diff** — las lesiones se aplican post-modelo en `adjust_predictions()`
 
-### 2. Actualizar `.env`
+### Después de reentrenar
 
-Abrir `C:\Betplay\.env` y cambiar:
-
+**1. Actualizar `.env`:**
 ```
 MODEL_VERSION=vN
-MODEL_TYPE=stacking
 ```
 
-### 3. Reiniciar el servidor
-
+**2. Reiniciar el servidor:**
 ```
 Ctrl+C  →  uvicorn web.app:app --reload --port 8000
 ```
@@ -163,7 +171,7 @@ Set-ScheduledTask -TaskName "Betplay Pipeline"  -Settings $s
 | `output/bet_journal.csv` | **Nunca borrar** — historial acumulado de todas las versiones |
 | `output/*.csv` | Nunca — se sobreescriben solos |
 | `models/nba_model_vN.joblib` | Nunca — guardar todos como respaldo |
-| `sports/atp/models/atp_model_v1.joblib` | Nunca — solo al re-entrenar |
+| `sports/atp/models/atp_model_v2.joblib` | Nunca — solo al re-entrenar |
 | `sports/atp/models/current_elos.json` | Se regenera con `build_elos.py` |
 | `database/cron_local.bat` | Solo si cambias horarios del Task Scheduler |
 | `reconcile.py` | No tocar |
@@ -176,9 +184,11 @@ Set-ScheduledTask -TaskName "Betplay Pipeline"  -Settings $s
 | Versión | Tipo | Fecha | Accuracy | Notas |
 |---|---|---|---|---|
 | v9 | StackingClassifier (XGB+RF+LR) | May 2026 | 66.2% | Baseline |
-| v10+ | StackingClassifier (XGB+RF+LR) | — | — | Rolling stats + injury feature |
+| v10 | StackingClassifier (XGB+RF+LR) | May 2026 | 68.5% | +standings features, sin injury_impact_diff, CV-AUC 0.806 |
+| v11+ | — | — | — | Próxima versión post-Finales NBA (Jun 2026) |
 
 ### ATP
 | Versión | Tipo | Fecha | Val Accuracy | Val ROC-AUC | Notas |
 |---|---|---|---|---|---|
 | v1 | XGBoost + calibración isotónica | May 2026 | 63.6% | 0.698 | 13 features, train 2013-2023, val 2024 |
+| v2 | StackingClassifier (XGB+RF+LR) | May 2026 | 64.0% | 0.6935 | 17 features (+saque rolling), train 2013-2025, val honesta 2025 |

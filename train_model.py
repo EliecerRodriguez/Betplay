@@ -399,7 +399,17 @@ def build_training_data(
                     games_df["elo_diff"].min(), games_df["elo_diff"].max())
     except Exception as exc:
         logger.warning("enrich_with_elo fall\u00f3 (%s) \u2014 se entrena sin features Elo", exc)
-
+    # Enriquecer con contexto de clasificación (standings)
+    # Usamos standings actuales para todos los partidos del período de entrenamiento:
+    # es una aproximación válida para las últimas 8-12 semanas (valores estables).
+    try:
+        from sports.nba.ingestion.standings_client import enrich_with_standings
+        if "game_date" not in games_df.columns and "game_date_est" in games_df.columns:
+            games_df["game_date"] = pd.to_datetime(games_df["game_date_est"]).dt.date
+        games_df = enrich_with_standings(games_df, seasons[-1])
+        logger.info("Standings enriquecidos en dataset de entrenamiento")
+    except Exception as exc:
+        logger.warning("enrich_with_standings falló (%s) — se entrena sin features de clasificación", exc)
     feature_df = build_features(games_df, team_stats_df)
 
     if feature_df.empty:

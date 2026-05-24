@@ -728,7 +728,7 @@ def _log_atp_bets_to_journal(data: dict, bankroll: float) -> None:
     para calcular P&L real una vez que se conozcan los resultados."""
     journal_path = os.path.join(_BASE_DIR, "output", "atp_bet_journal.csv")
     date_str  = data.get("date", "")
-    model_ver = os.environ.get("ATP_MODEL_VERSION", "atp_v1")
+    model_ver = os.environ.get("ATP_MODEL_VERSION", "atp_v2")
 
     existing_keys: set[tuple] = set()   # (match_id, predicted_player, bookmaker)
     rows: list[dict] = []
@@ -1986,7 +1986,7 @@ def get_atp_backtest(bankroll: float = Query(default=500_000), period: str = Que
         p2            = str(row.get("player2_name", ""))
         predicted     = str(row.get("predicted_player", ""))
         opponent      = str(row.get("opponent", ""))
-        model_v       = str(row.get("model_version", "atp_v1"))
+        model_v       = str(row.get("model_version", "atp_v2"))
         odds_val      = float(row.get("market_odds", 1.91) or 1.91)
         kelly_pct     = float(row.get("kelly_pct", 0) or 0)
         model_prob_pct = float(row.get("model_prob_pct", 50) or 50)

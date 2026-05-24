@@ -277,6 +277,36 @@ def build_features(
     if "home_efg_pct" in feature_df.columns and "visitor_efg_pct" in feature_df.columns:
         feature_df["efg_pct_diff"] = feature_df["home_efg_pct"] - feature_df["visitor_efg_pct"]
 
+    # ── Densidad de agenda / fatiga acumulada ─────────────────────────────────
+    # games_last_7d/14d vienen de enrich_with_form (get_team_form).
+    # schedule_density_diff > 0 → el local jugó más partidos recientes → más fatigado.
+    if "home_games_last_7d" in feature_df.columns and "visitor_games_last_7d" in feature_df.columns:
+        feature_df["schedule_density_diff_7d"] = (
+            feature_df["home_games_last_7d"] - feature_df["visitor_games_last_7d"]
+        )
+    if "home_games_last_14d" in feature_df.columns and "visitor_games_last_14d" in feature_df.columns:
+        feature_df["schedule_density_diff_14d"] = (
+            feature_df["home_games_last_14d"] - feature_df["visitor_games_last_14d"]
+        )
+
+    # ── Contexto de temporada / motivación ────────────────────────────────────
+    # Fuente: enrich_with_standings (standings_client).
+    # seed_diff > 0 → local con mejor posición en conferencia (número menor = mejor).
+    # clinched_diff > 0 → local clasificado pero visitante no → asimetría de motivación.
+    if "home_playoff_seed" in feature_df.columns and "visitor_playoff_seed" in feature_df.columns:
+        feature_df["seed_diff"] = (
+            feature_df["visitor_playoff_seed"] - feature_df["home_playoff_seed"]
+        )
+    if "home_games_back" in feature_df.columns and "visitor_games_back" in feature_df.columns:
+        feature_df["games_back_diff"] = (
+            feature_df["visitor_games_back"] - feature_df["home_games_back"]
+        )
+    if "home_clinched_playoff" in feature_df.columns and "visitor_clinched_playoff" in feature_df.columns:
+        feature_df["clinched_diff"] = (
+            feature_df["home_clinched_playoff"].astype(int)
+            - feature_df["visitor_clinched_playoff"].astype(int)
+        )
+
     # ── Variable objetivo ─────────────────────────────────────────────────────
     # Si el partido ya terminó y hay marcadores, calculamos el resultado real.
     # Prioridad: home_team_score > home_pts_x (después del merge con stats) > input home_win
@@ -352,7 +382,27 @@ def get_feature_columns() -> list[str]:
         "visitor_rest_days",
         "rest_advantage",
         "home_is_b2b",
-        "visitor_is_b2b",        # ── Viaje y jet lag ─────────────────────────────────────────────────
+        "visitor_is_b2b",
+        # ── Densidad de agenda (fatiga acumulada últimos 7/14 días) ──
+        "home_games_last_7d",
+        "visitor_games_last_7d",
+        "schedule_density_diff_7d",
+        "home_games_last_14d",
+        "visitor_games_last_14d",
+        "schedule_density_diff_14d",
+        # ── Contexto de temporada / motivación ───────────────────
+        "home_playoff_seed",      # posición en conferencia (1=líder, 15=último)
+        "visitor_playoff_seed",
+        "seed_diff",              # visitor_seed - home_seed (>0 = local mejor clasificado)
+        "home_games_back",        # juegos de desventaja con el líder de conf.
+        "visitor_games_back",
+        "games_back_diff",        # visitor_games_back - home_games_back
+        "home_clinched_playoff",  # 1 si ya tiene la clasificación asegurada
+        "visitor_clinched_playoff",
+        "clinched_diff",          # home_clinched - visitor_clinched (motivación asimétrica)
+        "home_eliminated",        # 1 si matemáticamente eliminado
+        "visitor_eliminated",
+        # ── Viaje y jet lag ─────────────────────────────────────────────────
         "home_tz_shift",          # horas de desfase horario del equipo local
         "visitor_tz_shift",       # horas de desfase horario del visitante
         "travel_tz_disadvantage", # visitor_tz_shift - home_tz_shift (>0 = visitor más cansado)
@@ -369,8 +419,10 @@ def get_feature_columns() -> list[str]:
         "pace_diff",           # ritmo de juego diferencial
         "ts_pct_diff",         # True Shooting % diferencial
         "efg_pct_diff",        # Effective FG% diferencial
-        # -- Lesiones -- impacto de estrellas ausentes (>0 = ventaja local)
-        "injury_impact_diff",  # visitor_ppg_lost - home_ppg_lost
+        # Nota: injury_impact_diff se aplica como ajuste post-modelo
+        # en adjust_predictions() — no como feature del modelo.
+        # Entrenar con ella introduce sesgo porque el historial de ESPN
+        # no está disponible para fechas pasadas (siempre 0 en training).
     ]
 
 
