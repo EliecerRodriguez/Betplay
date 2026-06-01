@@ -728,7 +728,7 @@ def _log_atp_bets_to_journal(data: dict, bankroll: float) -> None:
     para calcular P&L real una vez que se conozcan los resultados."""
     journal_path = os.path.join(_BASE_DIR, "output", "atp_bet_journal.csv")
     date_str  = data.get("date", "")
-    model_ver = os.environ.get("ATP_MODEL_VERSION", "atp_v2")
+    model_ver = os.environ.get("ATP_MODEL_VERSION", "atp_v4")
 
     existing_keys: set[tuple] = set()   # (match_id, predicted_player, bookmaker)
     rows: list[dict] = []
@@ -809,64 +809,85 @@ def _fetch_atp_completed_from_espn(pending_dates: list) -> list[dict]:
     Obtiene resultados de partidos ATP Men's Singles completados desde ESPN.
     No requiere clave API.
 
+    Se consulta ESPN por CADA fecha pendiente para no perder resultados de
+    días anteriores cuando la fecha máxima es hoy (el scoreboard de hoy no
+    incluye partidos completados ayer o antes).
+
     Returns:
-        Lista de dicts {player1, player2, winner}
+        Lista de dicts {player1, player2, winner, date}
     """
     import requests as _req
     if not pending_dates:
         return []
 
-    # Una sola llamada con la fecha más reciente cubre todos los torneos activos
-    query_date = max(pending_dates).replace("-", "")
-    try:
-        r = _req.get(
-            "https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard",
-            params={"dates": query_date},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=20,
-        )
-        r.raise_for_status()
-        data = r.json()
-    except Exception as exc:
-        logger.warning("ATP reconcile: ESPN API falló: %s", exc)
-        return []
+    def _parse_espn_data(data: dict, query_date: str) -> list[dict]:
+        parsed: list[dict] = []
+        for event in data.get("events", []):
+            for grouping in event.get("groupings", []):
+                grp_name = grouping.get("name", "").lower()
+                for comp in grouping.get("competitions", []):
+                    # Solo partidos finalizados o con retiro (ambos tienen ganador declarado)
+                    comp_status = (comp.get("status") or {}).get("type", {}).get("name", "")
+                    if comp_status not in ("STATUS_FINAL", "STATUS_RETIRED"):
+                        continue
+                    # Solo Men's Singles (excluye dobles y femenino)
+                    comp_type = (comp.get("type") or {}).get("text", "").lower()
+                    if "men" not in comp_type and "men" not in grp_name:
+                        continue
+                    if "singles" not in comp_type and "singles" not in grp_name:
+                        continue
+                    if "women" in comp_type or "women" in grp_name:
+                        continue
+
+                    competitors = [c for c in comp.get("competitors", []) if c.get("type") == "athlete"]
+                    if len(competitors) < 2:
+                        continue
+                    winner_name = None
+                    player_names: list[str] = []
+                    for c in competitors:
+                        name = (c.get("athlete") or {}).get("displayName", "")
+                        if not name:
+                            continue
+                        player_names.append(name)
+                        if c.get("winner"):
+                            winner_name = name
+                    if winner_name and len(player_names) == 2:
+                        raw_date = comp.get("date", "") or event.get("date", "")
+                        match_date = raw_date[:10] if raw_date else query_date
+                        parsed.append({
+                            "player1": player_names[0],
+                            "player2": player_names[1],
+                            "winner": winner_name,
+                            "date": match_date,
+                        })
+        return parsed
 
     results: list[dict] = []
-    for event in data.get("events", []):
-        for grouping in event.get("groupings", []):
-            grp_name = grouping.get("name", "").lower()
-            for comp in grouping.get("competitions", []):
-                # Solo partidos finalizados
-                if (comp.get("status") or {}).get("type", {}).get("name") != "STATUS_FINAL":
-                    continue
-                # Solo Men's Singles (excluye dobles y femenino)
-                comp_type = (comp.get("type") or {}).get("text", "").lower()
-                if "men" not in comp_type and "men" not in grp_name:
-                    continue
-                if "singles" not in comp_type and "singles" not in grp_name:
-                    continue
-                if "women" in comp_type or "women" in grp_name:
-                    continue
+    seen_keys: set[tuple] = set()   # evitar duplicados si ESPN repite un partido en dos fechas
 
-                competitors = [c for c in comp.get("competitors", []) if c.get("type") == "athlete"]
-                if len(competitors) < 2:
-                    continue
-                winner_name = None
-                player_names: list[str] = []
-                for c in competitors:
-                    name = (c.get("athlete") or {}).get("displayName", "")
-                    if not name:
-                        continue
-                    player_names.append(name)
-                    if c.get("winner"):
-                        winner_name = name
-                if winner_name and len(player_names) == 2:
-                    # Extraer fecha del partido para filtrado por fecha en _apply_results
-                    raw_date = comp.get("date", "") or event.get("date", "")
-                    match_date = raw_date[:10] if raw_date else ""
-                    results.append({"player1": player_names[0], "player2": player_names[1], "winner": winner_name, "date": match_date})
+    for date_str in sorted(set(pending_dates)):
+        query_date = date_str.replace("-", "")
+        try:
+            r = _req.get(
+                "https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard",
+                params={"dates": query_date},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=20,
+            )
+            r.raise_for_status()
+            data = r.json()
+        except Exception as exc:
+            logger.warning("ATP reconcile: ESPN API falló para %s: %s", date_str, exc)
+            continue
 
-    logger.info("ATP reconcile: %d Men's Singles completados desde ESPN para %s", len(results), query_date)
+        day_results = _parse_espn_data(data, date_str)
+        for rec in day_results:
+            key = (rec["player1"], rec["player2"], rec["date"])
+            if key not in seen_keys:
+                results.append(rec)
+                seen_keys.add(key)
+        logger.info("ATP reconcile: %d Men's Singles completados desde ESPN para %s", len(day_results), query_date)
+
     return results
 
 
@@ -1986,7 +2007,7 @@ def get_atp_backtest(bankroll: float = Query(default=500_000), period: str = Que
         p2            = str(row.get("player2_name", ""))
         predicted     = str(row.get("predicted_player", ""))
         opponent      = str(row.get("opponent", ""))
-        model_v       = str(row.get("model_version", "atp_v2"))
+        model_v       = str(row.get("model_version", "atp_v4"))
         odds_val      = float(row.get("market_odds", 1.91) or 1.91)
         kelly_pct     = float(row.get("kelly_pct", 0) or 0)
         model_prob_pct = float(row.get("model_prob_pct", 50) or 50)

@@ -3,7 +3,6 @@ Cliente NBA para la FASE 1 – Data Ingestion.
 
 Proporciona tres funciones principales:
   - get_daily_games(game_date)  → DataFrame con partidos de un día
-  - get_teams()                 → DataFrame con todos los equipos NBA
   - get_team_stats(season)      → DataFrame con estadísticas agregadas por equipo
 
 Usa nba_api (sin scraping). Respeta el rate‑limit con un delay configurable.
@@ -143,29 +142,6 @@ def get_line_scores(game_date: Optional[str] = None) -> pd.DataFrame:
 
     except Exception as exc:
         logger.error("Error al obtener line scores de %s: %s", game_date, exc, exc_info=True)
-        return pd.DataFrame()
-
-
-# ── Equipos ──────────────────────────────────────────────────────────────────
-
-def get_teams() -> pd.DataFrame:
-    """
-    Obtiene la lista estática de todos los equipos NBA activos.
-
-    Returns:
-        DataFrame con id, full_name, abbreviation, nickname, city, state, year_founded.
-    """
-    logger.info("Obteniendo lista de equipos NBA")
-
-    try:
-        all_teams = nba_teams_static.get_teams()
-        df = pd.DataFrame(all_teams)
-        df.columns = [c.lower() for c in df.columns]
-        logger.info("Equipos cargados: %d", len(df))
-        return df
-
-    except Exception as exc:
-        logger.error("Error al obtener equipos: %s", exc, exc_info=True)
         return pd.DataFrame()
 
 

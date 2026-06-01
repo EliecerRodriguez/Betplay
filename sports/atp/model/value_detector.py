@@ -15,6 +15,13 @@ Umbrales configurables:
   MIN_MODEL_CONFIDENCE   → el modelo debe tener al menos X% de certeza
   MIN_ODDS               → cuota mínima para considerar (evitar favoritos extremos)
   MAX_ODDS               → cuota máxima (evitar +20 que suelen ser ruido)
+  MAX_MODEL_MARKET_GAP   → diferencia máxima permitida entre probabilidad del
+                           modelo y probabilidad implícita del mercado.
+                           Si el modelo difiere >N pp del mercado, descartar:
+                           el mercado de Betplay/Rushbet es más informado cuando
+                           el desacuerdo es grande. (default: 0.10 = 10 pp)
+  EXCLUDE_QUALIFYING     → si True, excluye torneos de clasificatorias donde
+                           los Elos de jugadores desconocidos son poco fiables.
 
 Funciones públicas:
   - detect_value_bets(predictions_df, odds_df)  → DataFrame de value bets
@@ -32,10 +39,21 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 # ── Umbrales ──────────────────────────────────────────────────────────────────
-VALUE_THRESHOLD      = 0.08   # 8% de valor mínimo (filtra ruido)
-MIN_MODEL_CONFIDENCE = 0.62   # el modelo debe tener al menos 62% para considerar
+VALUE_THRESHOLD      = 0.05   # 5% de valor mínimo (filtra ruido leve)
+MIN_MODEL_CONFIDENCE = 0.68   # el modelo debe tener al menos 68% para considerar
 MIN_ODDS             = 1.40   # no analizar cuotas menores (favorito muy claro)
 MAX_ODDS             = 15.0   # no analizar cuotas mayores (demasiado inciertas)
+MAX_MODEL_MARKET_GAP = 0.10   # descarta si modelo difiere >10pp del mercado
+EXCLUDE_QUALIFYING   = True   # excluye partidos de clasificatorias (Elos poco fiables)
+
+# Palabras clave en el nombre del torneo que identifican clasificatorias
+_QUALIFYING_KEYWORDS = (
+    "clasificator",   # español: "Clasificatorios Open de Francia"
+    "qualifying",     # inglés
+    "qualif",
+    "previa",
+    "qualifier",
+)
 
 
 def detect_value_bets(
@@ -43,6 +61,8 @@ def detect_value_bets(
     odds_df: pd.DataFrame,
     value_threshold: float = VALUE_THRESHOLD,
     min_model_confidence: float = MIN_MODEL_CONFIDENCE,
+    max_model_market_gap: float = MAX_MODEL_MARKET_GAP,
+    exclude_qualifying: bool = EXCLUDE_QUALIFYING,
 ) -> pd.DataFrame:
     """
     Detecta value bets cruzando predicciones del modelo con cuotas de mercado.
@@ -68,6 +88,10 @@ def detect_value_bets(
 
         value_threshold:       Valor mínimo EV para reportar.
         min_model_confidence:  Probabilidad mínima del modelo para el lado apostado.
+        max_model_market_gap:  Diferencia máxima entre prob. modelo y prob. implícita
+                               del mercado. Descarta apuestas donde el modelo discrepa
+                               demasiado del mercado (señal de error en features).
+        exclude_qualifying:    Si True, descarta torneos de clasificatorias.
 
     Returns:
         DataFrame de value bets ordenado por value descendente.
@@ -81,7 +105,21 @@ def detect_value_bets(
 
     records = []
 
-    for _, pred in predictions_df.iterrows():
+    # Pre-filtrar predicciones de clasificatorias si corresponde
+    preds_filtered = predictions_df
+    if exclude_qualifying and "tourney_name" in predictions_df.columns:
+        qualifying_mask = predictions_df["tourney_name"].str.lower().str.contains(
+            "|".join(_QUALIFYING_KEYWORDS), na=False
+        )
+        n_excluded = int(qualifying_mask.sum())
+        if n_excluded:
+            logger.info(
+                "detect_value_bets: excluyendo %d partidos de clasificatorias",
+                n_excluded,
+            )
+        preds_filtered = predictions_df[~qualifying_mask].reset_index(drop=True)
+
+    for _, pred in preds_filtered.iterrows():
         p1 = str(pred.get("player1_name", ""))
         p2 = str(pred.get("player2_name", ""))
         p1_prob = float(pred.get("p1_win_prob", 0.5))
@@ -134,17 +172,28 @@ def detect_value_bets(
                 if model_prob < min_model_confidence:
                     continue
 
+                # Descartar cuando el modelo discrepa demasiado del mercado
+                # (el mercado de Betplay/Rushbet es más fiable en esos casos)
+                gap = abs(model_prob - market_prob)
+                if gap > max_model_market_gap:
+                    logger.debug(
+                        "Descartando %s (gap=%.0f%% > límite=%.0f%%)",
+                        player, gap * 100, max_model_market_gap * 100,
+                    )
+                    continue
+
                 value = round((model_prob * market_odds) - 1, 4)
 
                 if value < value_threshold:
                     continue
 
-                # Criterio de Kelly fraccionario (Kelly/4 = apuesta conservadora)
+                # Criterio de Kelly fraccionario (Kelly/8 = muy conservador mientras
+                # la accuracy real del modelo se establece > 55%)
                 # f = (p × b - q) / b  donde b = odds-1, p = prob_modelo, q = 1-p
                 b = market_odds - 1.0
                 q = 1.0 - model_prob
-                kelly_full   = (model_prob * b - q) / b if b > 0 else 0
-                kelly_fraction = round(max(0, kelly_full / 4), 4)   # ¼ Kelly
+                kelly_full     = (model_prob * b - q) / b if b > 0 else 0
+                kelly_fraction = round(max(0, kelly_full / 8), 4)   # ⅛ Kelly
 
                 records.append({
                     "match_id":       str(pred.get("match_id", "")),
@@ -209,7 +258,7 @@ def format_value_report(value_bets_df: pd.DataFrame) -> str:
             f"       Modelo: {row['model_prob']*100:.1f}% | Mercado: {row['market_prob']*100:.1f}% | Valor: +{row['value']*100:.1f}%"
         )
         lines.append(
-            f"       Kelly (1/4): {row['kelly_fraction']*100:.1f}% del bankroll"
+            f"       Kelly (1/8): {row['kelly_fraction']*100:.1f}% del bankroll"
         )
         lines.append("")
 

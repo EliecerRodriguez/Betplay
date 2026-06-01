@@ -14,7 +14,6 @@ Ejemplo:
 
 Funciones:
   - detect_value_bets(predictions_df, odds_df) → DataFrame de value bets
-  - format_value_bets_report(value_bets_df)    → string para logging/output
 """
 from __future__ import annotations
 
@@ -189,43 +188,3 @@ def detect_value_bets(
         n_total, n_value, value_threshold,
     )
     return result_df
-
-
-def format_value_bets_report(df: pd.DataFrame) -> str:
-    """
-    Genera un resumen legible de las value bets detectadas para logging o consola.
-
-    Args:
-        df: Resultado de detect_value_bets().
-
-    Returns:
-        String con el reporte formateado.
-    """
-    if df.empty:
-        return "Sin value bets disponibles para reportar."
-
-    value_bets = df[df["is_value_bet"]].copy()
-
-    if value_bets.empty:
-        return (
-            f"Se analizaron {len(df)} combinaciones.\n"
-            "No se encontraron value bets (value > 0) para los partidos de hoy."
-        )
-
-    lines = [
-        "=" * 60,
-        f"  VALUE BETS DETECTADAS ({len(value_bets)} de {len(df)} combinaciones)",
-        "=" * 60,
-    ]
-
-    for _, row in value_bets.iterrows():
-        lines.append(
-            f"  {row['game_id'][:10]:<12} | {row['side'].upper():<5} | "
-            f"{str(row.get('team_name','')):<20} | "
-            f"Bookmaker: {str(row['bookmaker']):<12} | "
-            f"Prob: {row['model_prob']:.1%}  Cuota: {row['odds']:.2f}  "
-            f"VALUE: +{row['value']:.3f}"
-        )
-
-    lines.append("=" * 60)
-    return "\n".join(lines)

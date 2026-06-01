@@ -118,15 +118,31 @@ Modelo guardado en `sports/atp/models/atp_model_v2.joblib`.
 cd C:\Betplay
 .\.venv\Scripts\Activate.ps1
 $env:PYTHONPATH = "C:\Betplay"
-# Post-Finales: usa 180 días para cubrir toda la temporada
-python train_model.py --version v11 --days 180 --with-form --with-travel --model stacking
+# Post-Finales: usa 2.5 temporadas con optimización Bayesiana (recomendado)
+python train_model.py --version v12 --start-date 2023-10-24 --season 2024-25 --season 2025-26 --model xgboost --optimize 50 --with-form
 ```
 
-Reemplazar `v11` por la siguiente versión disponible.
+Reemplazar `v12` por la siguiente versión disponible.
+
+Opciones del comando:
+| Opción | Descripción |
+|---|---|
+| `--start-date` / `--days N` | Rango histórico de partidos (caché en `data/cache/`) |
+| `--season YYYY-YY` | Temporada(s) para stats de equipo (puede repetirse) |
+| `--model` | `xgboost` (recomendado) \| `stacking` \| `random_forest` \| `logistic` |
+| `--optimize N` | **N trials de optimización Bayesiana** (Optuna TPE) — 0=desactivado |
+| `--with-form` | Incluir features de forma reciente y rest days |
+| `--with-travel` | Incluir features de jet lag (requiere `--with-form`) |
+| `--version vN` | Tag del archivo de salida en `models/` |
+
+> **`--optimize 50`**: Optuna prueba 50 combinaciones de hiperparámetros (n_estimators, max_depth,
+> learning_rate, subsample, etc.) usando `TimeSeriesSplit(3)` para evaluar cada configuración
+> sin data leakage temporal. Tarda ~20-40 min pero puede mejorar el ROC-AUC en 2-5%.
 
 El modelo se entrena con:
 - **Stats punto-en-el-tiempo** — rolling window por equipo (sin look-ahead bias)
 - **Features de clasificación** — standings (seed, games_back) desde `LeagueStandingsV3`
+- **Optimización Bayesiana** — Optuna TPESampler busca los mejores hiperparámetros XGBoost
 - **Sin injury_impact_diff** — las lesiones se aplican post-modelo en `adjust_predictions()`
 
 ### Después de reentrenar
@@ -185,7 +201,8 @@ Set-ScheduledTask -TaskName "Betplay Pipeline"  -Settings $s
 |---|---|---|---|---|
 | v9 | StackingClassifier (XGB+RF+LR) | May 2026 | 66.2% | Baseline |
 | v10 | StackingClassifier (XGB+RF+LR) | May 2026 | 68.5% | +standings features, sin injury_impact_diff, CV-AUC 0.806 |
-| v11+ | — | — | — | Próxima versión post-Finales NBA (Jun 2026) |
+| v11 | XGBoost + Optuna (50 trials) | May 2026 | 70.8% | ROC-AUC 0.752 · CV-AUC 0.704±0.041 · Brier 0.201 · 4086 muestras · 53 features · best trial #21 (elo_diff feature #1) |
+| v12+ | — | — | — | Próxima versión post-Finales NBA (Jun 2026) |
 
 ### ATP
 | Versión | Tipo | Fecha | Val Accuracy | Val ROC-AUC | Notas |

@@ -22,6 +22,7 @@ sqlalchemy>=2.0.0
 scikit-learn>=1.4.0
 joblib>=1.3.0
 pyarrow>=14.0.0      # caché de partidos históricos en formato parquet
+optuna>=3.6.0        # optimización bayesiana de hiperparámetros XGBoost
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 pytest>=8.0.0

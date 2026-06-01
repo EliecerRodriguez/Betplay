@@ -42,9 +42,10 @@ logger = get_logger(__name__)
 
 # ── Configuración ─────────────────────────────────────────────────────────────
 
-_ATP_MODEL_DIR    = os.getenv("ATP_MODEL_DIR", "sports/atp/models")
-_MODEL_FILENAME   = "atp_model_v2.joblib"
-_ELO_BLEND_WEIGHT = float(os.getenv("ATP_ELO_BLEND_WEIGHT", "0.4"))   # 40% Elo
+_ATP_MODEL_DIR       = os.getenv("ATP_MODEL_DIR", "sports/atp/models")
+_MODEL_FILENAME      = "atp_model_v4.joblib"
+_CALIB_MODEL_FILENAME = "atp_model_v4_calibrated.joblib"   # preferido cuando existe
+_ELO_BLEND_WEIGHT    = float(os.getenv("ATP_ELO_BLEND_WEIGHT", "0.5"))  # 50% Elo / 50% ML
 
 # Caché en memoria
 _model_cache: Optional[object]          = None
@@ -56,11 +57,28 @@ _rankings_cache: Optional[dict]        = None
 # ── Carga de recursos ─────────────────────────────────────────────────────────
 
 def load_model() -> Optional[object]:
-    """Carga el modelo ATP desde disco (cached en memoria)."""
+    """
+    Carga el modelo ATP desde disco (cached en memoria).
+
+    Prioridad:
+      1. atp_model_v4_calibrated.joblib  (bundle dict con isotonic calibration)
+      2. atp_model_v4.joblib             (pipeline sklearn sin calibrar, fallback)
+    """
     global _model_cache
     if _model_cache is not None:
         return _model_cache
 
+    # Intentar cargar modelo calibrado primero
+    calib_path = os.path.join(_ATP_MODEL_DIR, _CALIB_MODEL_FILENAME)
+    if os.path.exists(calib_path):
+        try:
+            _model_cache = joblib.load(calib_path)
+            logger.info("Modelo ATP calibrado cargado: %s", calib_path)
+            return _model_cache
+        except Exception as exc:
+            logger.warning("Error cargando modelo calibrado (%s) — intentando v3 base", exc)
+
+    # Fallback al modelo base
     path = os.path.join(_ATP_MODEL_DIR, _MODEL_FILENAME)
     if not os.path.exists(path):
         logger.info("Modelo ATP no encontrado en %s — usando solo Elo", path)
@@ -68,7 +86,7 @@ def load_model() -> Optional[object]:
 
     try:
         _model_cache = joblib.load(path)
-        logger.info("Modelo ATP cargado: %s", path)
+        logger.info("Modelo ATP base cargado: %s", path)
         return _model_cache
     except Exception as exc:
         logger.warning("Error cargando modelo ATP: %s", exc)
@@ -76,9 +94,10 @@ def load_model() -> Optional[object]:
 
 
 def is_model_available() -> bool:
-    """Devuelve True si hay un modelo entrenado disponible."""
-    path = os.path.join(_ATP_MODEL_DIR, _MODEL_FILENAME)
-    return os.path.exists(path)
+    """Devuelve True si hay un modelo entrenado disponible (calibrado o base)."""
+    calib_path = os.path.join(_ATP_MODEL_DIR, _CALIB_MODEL_FILENAME)
+    base_path  = os.path.join(_ATP_MODEL_DIR, _MODEL_FILENAME)
+    return os.path.exists(calib_path) or os.path.exists(base_path)
 
 
 def _get_elos() -> dict:
@@ -213,7 +232,12 @@ def predict_single(
                 [[features[col] for col in FEATURE_COLUMNS]],
                 columns=FEATURE_COLUMNS,
             )
-            ml_prob = float(model.predict_proba(feat_array)[0][1])
+            # Detectar si es bundle calibrado (dict) o pipeline sklearn directo
+            if isinstance(model, dict) and "base_model" in model:
+                raw_prob = float(model["base_model"].predict_proba(feat_array)[0][1])
+                ml_prob  = float(model["iso_reg"].predict([raw_prob])[0])
+            else:
+                ml_prob = float(model.predict_proba(feat_array)[0][1])
         except Exception as exc:
             logger.warning("Error en inferencia ML para %s vs %s: %s", player1_name, player2_name, exc)
 

@@ -728,8 +728,10 @@ def main() -> int:
 
     # ── Entrenar ──────────────────────────────────────────────────────────────
     logger.info("Iniciando entrenamiento …")
+    if args.optimize > 0:
+        logger.info("Optimización Bayesiana activada: %d trials Optuna", args.optimize)
     try:
-        metrics = train(X, y, model_type=args.model, version=args.version)
+        metrics = train(X, y, model_type=args.model, version=args.version, optimize_trials=args.optimize)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Error durante el entrenamiento: %s", exc)
         return 1

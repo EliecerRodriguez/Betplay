@@ -1,0 +1,29 @@
+Model          : atp_model_v4 (StackingClassifier XGB+RF+LR — más regularizado)
+Features       : 21 (elo_diff, elo_win_prob, h2h_win_rate, h2h_surface_rate, h2h_total_log, form_diff, form_surface_diff, is_clay, is_grass, is_grand_slam, is_masters, ranking_diff_log, p1_matches_log, first_serve_in_pct_diff, first_serve_win_pct_diff, bp_save_rate_diff, ace_rate_diff, rest_advantage_diff, p1_returning, p1_sets_last_match, tourney_rounds_rest_diff)
+Train data     : 2013–2024 (2025 RESERVADO para calibración sin leakage)
+Elo warmup     : 2010–2026
+
+[Fast-check 2023-2024]
+  split       : fast-check val (2023-2024)
+  n_samples   : 10242
+  accuracy    : 0.8073
+  roc_auc     : 0.9053
+  brier       : 0.1259
+  log_loss    : 0.3902
+
+[Honesto val 2025]
+  split       : honesto val 2025
+  n_samples   : 4908
+  accuracy    : 0.8091
+  roc_auc     : 0.9061
+  brier       : 0.1254
+  log_loss    : 0.3884
+
+[Calibración isotónica 2025]
+  brier_base   : 0.1254
+  brier_calib  : 0.122
+  mejora       : +0.0034
+
+Archivos:
+  base      : sports/atp/models\atp_model_v4.joblib
+  calibrado : sports/atp/models\atp_model_v4_calibrated.joblib

@@ -9,7 +9,7 @@ Casas pendientes (Wplay, Betsson, Bwin) se devuelven vacias hasta
 que se identifique su API backend.
 
 Uso:
-  from ingestion.co_odds_scraper import get_co_odds
+  from sports.nba.ingestion.co_odds_scraper import get_co_odds
   df = get_co_odds()
 """
 from __future__ import annotations

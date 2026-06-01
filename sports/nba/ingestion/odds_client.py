@@ -120,7 +120,7 @@ def _fetch_co_odds(games_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
         DataFrame con cuotas reales de las casas colombianas.
     """
     try:
-        from ingestion.co_odds_scraper import get_co_odds
+        from sports.nba.ingestion.co_odds_scraper import get_co_odds
         logger.info("Modo SCRAPING CO: extrayendo cuotas de Betplay, Wplay, Rushbet, Bwin, Betsson")
         return get_co_odds(games_df=games_df)
     except ImportError as exc:
