@@ -26,11 +26,11 @@ jobs:
     steps:
       # ── 1. Checkout ─────────────────────────────────────────────────────────
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       # ── 2. Python ───────────────────────────────────────────────────────────
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5.6.0
         with:
           python-version: "3.11"
           cache: "pip"
@@ -58,7 +58,7 @@ jobs:
       # ── 6. Subir logs (siempre) ─────────────────────────────────────────────
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: catchup-logs-${{ github.run_id }}
           path: logs/
@@ -67,7 +67,7 @@ jobs:
       # ── 7. Subir CSVs resultantes ───────────────────────────────────────────
       - name: Upload output CSVs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: catchup-output-${{ github.run_id }}
           path: output/
