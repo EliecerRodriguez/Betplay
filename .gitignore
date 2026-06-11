@@ -12,6 +12,8 @@ output/
 data/cache/
 *.csv
 *.pkl
+# Excluir .joblib globalmente EXCEPTO los modelos entrenados en models/
 *.joblib
+!models/*.joblib
 .pytest_cache/
 .coverage

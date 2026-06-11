@@ -1,0 +1,50 @@
+name: NBA – Reconciliar Resultados
+
+on:
+  # 11:30 UTC = 06:30 hora Colombia — corre 30 min antes del pipeline NBA
+  # para que los resultados de ayer ya estén en Supabase cuando se generen
+  # las predicciones de hoy.
+  schedule:
+    - cron: "30 11 * * *"
+
+  # Ejecución manual (útil para forzar reconciliación de días pasados)
+  workflow_dispatch:
+
+jobs:
+  reconcile:
+    name: Reconcile Results
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create logs directory
+        run: mkdir -p logs
+
+      - name: Run reconcile
+        env:
+          DATABASE_URL:  ${{ secrets.DATABASE_URL }}
+          NBA_SEASON:    "2025-26"
+          MODEL_VERSION: v11
+          LOG_LEVEL:     INFO
+          PYTHONPATH:    ${{ github.workspace }}
+        run: python reconcile.py
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reconcile-logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 14

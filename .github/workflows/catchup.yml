@@ -1,30 +1,25 @@
-name: NBA – Pipeline Diario
+name: Catch-up – Reconciliar Resultados Pasados
+
+# PROPÓSITO: Actualizar en Supabase el resultado real (ganó/perdió) de predicciones
+# que YA fueron generadas en su día por el pipeline diario pero cuyo resultado
+# aún no fue registrado (por ejemplo, porque reconcile.py no corrió esos días).
+#
+# IMPORTANTE: Este workflow NO genera predicciones retroactivas.
+# Las predicciones se generan ANTES del partido (pipeline diario a las 07:00).
+# Este workflow solo actualiza la columna home_win en Supabase con el resultado real.
 
 on:
-  # 12:00 UTC = 07:00 ET = 07:00 hora Colombia
-  # Los partidos NBA terminan entre 01:00-03:00 UTC; a las 12:00 todos los resultados están disponibles.
-  schedule:
-    - cron: "0 12 * * *"
-
-  # Ejecución manual desde la pestaña "Actions" → "Run workflow"
+  # Solo manual: úsalo cuando vuelves después de varios días sin entrar
   workflow_dispatch:
     inputs:
-      date:
-        description: "Fecha a procesar (YYYY-MM-DD). Vacío = hoy."
-        required: false
-        default: ""
       season:
         description: "Temporada NBA (ej. 2025-26)"
         required: false
         default: "2025-26"
-      upload_csv:
-        description: "¿Subir CSVs de output como artefacto? (true/false)"
-        required: false
-        default: "false"
 
 jobs:
-  pipeline:
-    name: NBA Pipeline
+  catchup-reconcile:
+    name: Reconciliar Resultados Pendientes
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -46,40 +41,34 @@ jobs:
 
       # ── 4. Crear directorios necesarios ─────────────────────────────────────
       - name: Create output and logs directories
-        run: mkdir -p output/snapshots logs
+        run: mkdir -p output logs
 
-      # ── 5. Pipeline principal ───────────────────────────────────────────────
-      - name: Run NBA pipeline
+      # ── 5. Reconciliar TODOS los resultados pendientes en Supabase ──────────
+      # reconcile.py consulta todas las predicciones donde home_win IS NULL,
+      # obtiene los resultados reales de la NBA API y actualiza Supabase.
+      - name: Run reconcile (all pending results)
         env:
           DATABASE_URL:  ${{ secrets.DATABASE_URL }}
-          ODDS_API_KEY:  ${{ secrets.ODDS_API_KEY }}
           NBA_SEASON:    ${{ github.event.inputs.season || '2025-26' }}
           MODEL_VERSION: v11
-          MODEL_TYPE:    xgboost
           LOG_LEVEL:     INFO
           PYTHONPATH:    ${{ github.workspace }}
-        run: |
-          DATE_ARG="${{ github.event.inputs.date }}"
-          if [ -n "$DATE_ARG" ]; then
-            python run_pipeline.py --date "$DATE_ARG"
-          else
-            python run_pipeline.py
-          fi
+        run: python reconcile.py
 
-      # ── 6. Subir logs (siempre, incluso si falla) ───────────────────────────
+      # ── 6. Subir logs (siempre) ─────────────────────────────────────────────
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nba-logs-${{ github.run_id }}
+          name: catchup-logs-${{ github.run_id }}
           path: logs/
-          retention-days: 14
+          retention-days: 30
 
-      # ── 7. Subir CSVs de output (opcional) ─────────────────────────────────
+      # ── 7. Subir CSVs resultantes ───────────────────────────────────────────
       - name: Upload output CSVs
-        if: ${{ github.event.inputs.upload_csv == 'true' }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nba-output-${{ github.run_id }}
+          name: catchup-output-${{ github.run_id }}
           path: output/
-          retention-days: 7
+          retention-days: 30

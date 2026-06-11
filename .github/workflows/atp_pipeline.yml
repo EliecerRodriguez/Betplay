@@ -1,10 +1,10 @@
-name: NBA – Pipeline Diario
+name: ATP – Pipeline Diario
 
 on:
-  # 12:00 UTC = 07:00 ET = 07:00 hora Colombia
-  # Los partidos NBA terminan entre 01:00-03:00 UTC; a las 12:00 todos los resultados están disponibles.
+  # 23:00 UTC = 18:00 hora Colombia (UTC-5)
+  # Los partidos ATP empiezan a mediodía local; a las 6 PM ya hay cuotas activas.
   schedule:
-    - cron: "0 12 * * *"
+    - cron: "0 23 * * *"
 
   # Ejecución manual desde la pestaña "Actions" → "Run workflow"
   workflow_dispatch:
@@ -13,20 +13,16 @@ on:
         description: "Fecha a procesar (YYYY-MM-DD). Vacío = hoy."
         required: false
         default: ""
-      season:
-        description: "Temporada NBA (ej. 2025-26)"
-        required: false
-        default: "2025-26"
       upload_csv:
         description: "¿Subir CSVs de output como artefacto? (true/false)"
         required: false
         default: "false"
 
 jobs:
-  pipeline:
-    name: NBA Pipeline
+  atp-pipeline:
+    name: ATP Pipeline
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
 
     steps:
       # ── 1. Checkout ─────────────────────────────────────────────────────────
@@ -46,24 +42,22 @@ jobs:
 
       # ── 4. Crear directorios necesarios ─────────────────────────────────────
       - name: Create output and logs directories
-        run: mkdir -p output/snapshots logs
+        run: mkdir -p output logs
 
-      # ── 5. Pipeline principal ───────────────────────────────────────────────
-      - name: Run NBA pipeline
+      # ── 5. Pipeline ATP ─────────────────────────────────────────────────────
+      - name: Run ATP pipeline
         env:
-          DATABASE_URL:  ${{ secrets.DATABASE_URL }}
-          ODDS_API_KEY:  ${{ secrets.ODDS_API_KEY }}
-          NBA_SEASON:    ${{ github.event.inputs.season || '2025-26' }}
-          MODEL_VERSION: v11
-          MODEL_TYPE:    xgboost
-          LOG_LEVEL:     INFO
-          PYTHONPATH:    ${{ github.workspace }}
+          DATABASE_URL:      ${{ secrets.DATABASE_URL }}
+          ODDS_API_KEY:      ${{ secrets.ODDS_API_KEY }}
+          ATP_MODEL_VERSION: atp_v4
+          LOG_LEVEL:         INFO
+          PYTHONPATH:        ${{ github.workspace }}
         run: |
           DATE_ARG="${{ github.event.inputs.date }}"
           if [ -n "$DATE_ARG" ]; then
-            python run_pipeline.py --date "$DATE_ARG"
+            python run_atp_pipeline.py --date "$DATE_ARG"
           else
-            python run_pipeline.py
+            python run_atp_pipeline.py
           fi
 
       # ── 6. Subir logs (siempre, incluso si falla) ───────────────────────────
@@ -71,7 +65,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nba-logs-${{ github.run_id }}
+          name: atp-logs-${{ github.run_id }}
           path: logs/
           retention-days: 14
 
@@ -80,6 +74,6 @@ jobs:
         if: ${{ github.event.inputs.upload_csv == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: nba-output-${{ github.run_id }}
+          name: atp-output-${{ github.run_id }}
           path: output/
           retention-days: 7

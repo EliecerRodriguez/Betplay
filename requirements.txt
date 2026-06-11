@@ -11,9 +11,6 @@ numpy>=1.26.0
 # ── HTTP (Odds API) ───────────────────────────────────────────────────────────
 requests>=2.31.0
 
-# ── Web Scraping (cuotas casas colombianas) ───────────────────────────────────
-playwright>=1.44.0       # pip install playwright && playwright install chromium
-
 # ── Database (Fase 2) ─────────────────────────────────────────────────────────
 psycopg2-binary>=2.9.9
 sqlalchemy>=2.0.0
