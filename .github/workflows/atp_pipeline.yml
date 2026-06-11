@@ -52,6 +52,7 @@ jobs:
           ATP_MODEL_VERSION: atp_v4
           LOG_LEVEL:         INFO
           PYTHONPATH:        ${{ github.workspace }}
+          NBA_API_TIMEOUT: "60"
         run: |
           DATE_ARG="${{ github.event.inputs.date }}"
           if [ -n "$DATE_ARG" ]; then
