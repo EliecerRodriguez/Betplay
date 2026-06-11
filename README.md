@@ -4,22 +4,24 @@ Sistema de predicción multi-deporte (NBA y tenis ATP) con detección de value b
 
 ---
 
-## Estado de la infraestructura
+## Cómo funciona ahora (automatización completa vía GitHub Actions)
 
-| Componente | Estado |
-|---|---|
-| Supabase (PostgreSQL) | ✅ Conectado — almacena predictions, games, odds, line_scores |
-| pg_cron 1.6.4 | ✅ Habilitado (sin jobs activos — servidor local sin URL pública) |
-| pg_net 0.20.0 | ✅ Habilitado (disponible para futuro despliegue) |
-| Tablas y vistas | ✅ Se crean automáticamente al iniciar el servidor |
-| Task Scheduler | ✅ Configurado — Betplay Reconcile 10:00 / Betplay Pipeline 10:30 |
+**El sistema corre solo todos los días en los servidores de GitHub aunque tu PC esté apagado.**
 
-> Todas las escrituras a Supabase son **upserts** (INSERT … ON CONFLICT DO UPDATE).
-> Correr los scripts más de una vez el mismo día no genera duplicados.
+### Qué pasa cada día sin que hagas nada
+
+| Hora Colombia | Qué ocurre | Script |
+|---|---|---|
+| 06:30 AM | Reconciliación: busca predicciones sin resultado y llena el score real de ayer en Supabase | `reconcile.py` |
+| 07:00 AM | Pipeline NBA: genera predicciones del día de hoy (partidos que aún no ocurrieron) y las guarda en Supabase | `run_pipeline.py` |
+| 06:00 PM | Pipeline ATP: obtiene cuotas Kambi en tiempo real y genera predicciones ATP del día | `run_atp_pipeline.py` |
+
+> Las predicciones se generan **antes del partido**. Eso es lo que les da valor.
+> La reconciliación actualiza al día siguiente si el modelo acertó o no.
 
 ---
 
-## Inicio rápido (abrir el dashboard)
+## Qué ves cuando abres el dashboard (aunque hayas estado días sin entrar)
 
 ```powershell
 cd C:\Betplay
@@ -28,41 +30,75 @@ $env:PYTHONPATH = "C:\Betplay"
 uvicorn web.app:app --reload --port 8000
 ```
 
-Abrir en el navegador: http://localhost:8000
+Abrir en el navegador: **http://localhost:8000**
 
-> Al arrancar, el servidor crea automáticamente las tablas y vistas en Supabase si no existen.
-> El dashboard es opcional — las tareas automáticas corren aunque el servidor esté apagado.
+Al abrir el dashboard encontrarás en Supabase:
+- Las **predicciones de cada día** que corrió el pipeline automático (con fecha correcta)
+- El **resultado real** de cada partido ya reconciliado (ganó/perdió el modelo)
+- Las **value bets detectadas** por día
+- El **accuracy acumulado** del modelo
 
----
-
-## Rutina DIARIA — no tienes que hacer nada
-
-El Task Scheduler corre automáticamente:
-
-| Hora | Tarea | Qué hace |
-|---|---|---|
-| 10:00 AM | Betplay Reconcile | Descarga resultados reales, actualiza `home_win` en predictions y Supabase |
-| 10:30 AM | Betplay Pipeline | Genera predicciones del día, guarda en `output/` y Supabase |
-
-Si el PC estaba apagado a esa hora, las tareas corren **solas en cuanto lo prendes** (opción StartWhenAvailable activada).
-
-**No borrar nada. No tocar `.env`.**
+> El dashboard es solo un visualizador — los datos ya están en Supabase independientemente de si lo abres o no.
 
 ---
 
-## Recuperación manual (si algo falló o quieres forzar la actualización)
+## Estado de la infraestructura
 
+| Componente | Estado |
+|---|---|
+| Supabase (PostgreSQL) | ✅ Conectado — puerto 6543 (Transaction Pooler) |
+| GitHub Actions | ✅ Activo — 3 workflows automáticos diarios |
+| Tablas y vistas | ✅ Se crean automáticamente en el primer arranque |
+| Task Scheduler local | ⛔ Ya no es necesario — reemplazado por GitHub Actions |
+
+> Todas las escrituras son **upserts** (INSERT … ON CONFLICT DO UPDATE).
+> Correr los scripts más de una vez el mismo día no genera duplicados.
+
+---
+
+## Lo único que debes hacer tú
+
+### 1. Nada en el día a día
+Los pipelines corren solos. Solo abre el dashboard cuando quieras revisar los resultados.
+
+### 2. Forzar manualmente un pipeline (si necesitas)
+Ve a GitHub → **Actions** → selecciona el workflow → **Run workflow**:
+
+| Workflow | URL |
+|---|---|
+| NBA Pipeline | `github.com/EliecerRodriguez/Betplay/actions/workflows/daily_pipeline.yml` |
+| Reconciliar resultados | `github.com/EliecerRodriguez/Betplay/actions/workflows/reconcile.yml` |
+| ATP Pipeline | `github.com/EliecerRodriguez/Betplay/actions/workflows/atp_pipeline.yml` |
+| Catch-up (reconciliar resultados pendientes) | `github.com/EliecerRodriguez/Betplay/actions/workflows/catchup.yml` |
+
+### 3. Si hubo un fallo y los datos de Supabase están desactualizados
+Ejecuta el workflow **"Catch-up – Reconciliar Resultados Pasados"** manualmente desde GitHub Actions.
+Esto busca todas las predicciones sin resultado en Supabase y las actualiza, sin importar de cuándo sean.
+
+### 4. Actualizar el modelo (cuando quieras reentrenar)
+Esto sí requiere correrlo localmente:
 ```powershell
 cd C:\Betplay
 .\.venv\Scripts\Activate.ps1
 $env:PYTHONPATH = "C:\Betplay"
-python reconcile.py       # recupera resultados de todos los días pendientes
-python run_pipeline.py    # genera predicciones NBA del día actual
-python run_atp_pipeline.py  # genera predicciones ATP del día actual
+python train_model.py          # reentrenar modelo NBA
+python build_atp_model.py --force  # reentrenar modelo ATP
+git add models/
+git commit -m "feat: retrain model"
+git push
 ```
 
-> `reconcile.py` revisa TODAS las predicciones sin resultado desde cualquier fecha pasada,
-> no solo el día anterior. Si te olvidaste varios días, una sola ejecución lo recupera todo.
+---
+
+## Secretos de GitHub (ya configurados)
+
+| Secret | Para qué se usa |
+|---|---|
+| `DATABASE_URL` | Conexión a Supabase desde los workflows. Puerto 6543 (Transaction Pooler) |
+| `ODDS_API_KEY` | The Odds API (opcional — sin clave usa cuotas Kambi scrapeadas) |
+
+> Si cambias la contraseña de Supabase debes actualizar `DATABASE_URL` en:
+> `github.com/EliecerRodriguez/Betplay/settings/secrets/actions`
 
 ---
 
