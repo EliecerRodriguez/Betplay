@@ -1,10 +1,13 @@
 name: ATP – Pipeline Diario
 
 on:
-  # 23:00 UTC = 18:00 hora Colombia (UTC-5)
-  # Los partidos ATP empiezan a mediodía local; a las 6 PM ya hay cuotas activas.
+  # 10:00 UTC = 05:00 hora Colombia (UTC-5)
+  # Los partidos ATP europeos empiezan ~13:00 UTC; corremos a las 10:00 UTC cuando
+  # todos los mercados están abiertos (NOT_STARTED) y Kambi devuelve las cuotas.
+  # Segundo disparo a las 14:00 UTC cubre cualquier partido americano tardío.
   schedule:
-    - cron: "0 23 * * *"
+    - cron: "0 10 * * *"
+    - cron: "0 14 * * *"
 
   # Ejecución manual desde la pestaña "Actions" → "Run workflow"
   workflow_dispatch:

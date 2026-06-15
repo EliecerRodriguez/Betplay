@@ -7,6 +7,8 @@ Proporciona tres funciones principales:
 
 Usa nba_api (sin scraping). Respeta el rate‑limit con un delay configurable.
 """
+import json
+import os
 import time
 from datetime import date, datetime
 from typing import Optional
@@ -22,6 +24,16 @@ from config.settings import NBA_API_DELAY, NBA_API_TIMEOUT, NBA_SEASON
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# ── Headers para stats.nba.com (necesario en IPs de nube / GitHub Actions) ──
+_raw_headers = os.getenv("NBA_DATA_HEADERS", "")
+if _raw_headers:
+    try:
+        from nba_api.library.http import NBAStatsHTTP
+        NBAStatsHTTP.headers = json.loads(_raw_headers)
+        logger.info("nba_api: headers custom aplicados desde NBA_DATA_HEADERS")
+    except Exception as _exc:
+        logger.debug("nba_api: no se pudieron aplicar headers custom: %s", _exc)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

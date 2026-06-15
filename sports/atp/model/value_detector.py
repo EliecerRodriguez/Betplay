@@ -40,10 +40,10 @@ logger = get_logger(__name__)
 
 # ── Umbrales ──────────────────────────────────────────────────────────────────
 VALUE_THRESHOLD      = 0.05   # 5% de valor mínimo (filtra ruido leve)
-MIN_MODEL_CONFIDENCE = 0.68   # el modelo debe tener al menos 68% para considerar
+MIN_MODEL_CONFIDENCE = 0.63   # el modelo debe tener al menos 63% para considerar
 MIN_ODDS             = 1.40   # no analizar cuotas menores (favorito muy claro)
 MAX_ODDS             = 15.0   # no analizar cuotas mayores (demasiado inciertas)
-MAX_MODEL_MARKET_GAP = 0.10   # descarta si modelo difiere >10pp del mercado
+MAX_MODEL_MARKET_GAP = 0.12   # descarta si modelo difiere >12pp del mercado
 EXCLUDE_QUALIFYING   = True   # excluye partidos de clasificatorias (Elos poco fiables)
 
 # Palabras clave en el nombre del torneo que identifican clasificatorias
