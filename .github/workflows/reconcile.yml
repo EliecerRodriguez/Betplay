@@ -1,11 +1,11 @@
 name: NBA – Reconciliar Resultados
 
 on:
-  # 11:30 UTC = 06:30 hora Colombia — corre 30 min antes del pipeline NBA
-  # para que los resultados de ayer ya estén en Supabase cuando se generen
-  # las predicciones de hoy.
+  # 08:00 UTC = 03:00 hora Colombia (UTC-5).
+  # Se ejecuta UNA sola vez al día, a la misma hora que los pipelines NBA y ATP,
+  # para que los resultados de ayer queden reconciliados en Supabase al iniciar el día.
   schedule:
-    - cron: "30 11 * * *"
+    - cron: "0 8 * * *"
 
   # Ejecución manual (útil para forzar reconciliación de días pasados)
   workflow_dispatch:

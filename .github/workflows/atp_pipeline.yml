@@ -1,13 +1,13 @@
 name: ATP – Pipeline Diario
 
 on:
-  # 10:00 UTC = 05:00 hora Colombia (UTC-5)
-  # Los partidos ATP europeos empiezan ~13:00 UTC; corremos a las 10:00 UTC cuando
-  # todos los mercados están abiertos (NOT_STARTED) y Kambi devuelve las cuotas.
-  # Segundo disparo a las 14:00 UTC cubre cualquier partido americano tardío.
-  schedule:
-    - cron: "0 10 * * *"
-    - cron: "0 14 * * *"
+  # Se encadena: se ejecuta automáticamente cuando termina el workflow
+  # "NBA – Reconciliar Resultados" (reconcile.yml), que corre a las
+  # 08:00 UTC (03:00 hora Colombia). Así garantizamos que los resultados
+  # de ayer ya estén en Supabase antes de generar las predicciones ATP de hoy.
+  workflow_run:
+    workflows: ["NBA – Reconciliar Resultados"]
+    types: [completed]
 
   # Ejecución manual desde la pestaña "Actions" → "Run workflow"
   workflow_dispatch:
@@ -26,6 +26,8 @@ jobs:
     name: ATP Pipeline
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Solo correr si el workflow reconcile que lo disparó terminó con éxito.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       # ── 1. Checkout ─────────────────────────────────────────────────────────

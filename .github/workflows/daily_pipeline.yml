@@ -1,10 +1,13 @@
 name: NBA – Pipeline Diario
 
 on:
-  # 12:00 UTC = 07:00 ET = 07:00 hora Colombia
-  # Los partidos NBA terminan entre 01:00-03:00 UTC; a las 12:00 todos los resultados están disponibles.
-  schedule:
-    - cron: "0 12 * * *"
+  # Se encadena: se ejecuta automáticamente cuando termina el workflow
+  # "NBA – Reconciliar Resultados" (reconcile.yml), que corre a las
+  # 08:00 UTC (03:00 hora Colombia). Así garantizamos que los resultados
+  # de ayer ya estén en Supabase antes de generar las predicciones de hoy.
+  workflow_run:
+    workflows: ["NBA – Reconciliar Resultados"]
+    types: [completed]
 
   # Ejecución manual desde la pestaña "Actions" → "Run workflow"
   workflow_dispatch:
@@ -27,6 +30,8 @@ jobs:
     name: NBA Pipeline
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Solo correr si el workflow reconcile que lo disparó terminó con éxito.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       # ── 1. Checkout ─────────────────────────────────────────────────────────
