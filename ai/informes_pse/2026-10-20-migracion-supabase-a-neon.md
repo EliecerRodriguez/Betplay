@@ -18,6 +18,7 @@ Reemplazar Supabase (PostgreSQL) como backend de persistencia por **Neon Postgre
 | `run_pipeline.py` | Función `save_to_supabase()` renombrada a `save_to_database()` + docstring/log actualizados. La función ya no menciona Supabase. |
 | `web/app.py` | Comentarios, docstrings y logs de "Supabase" → "Neon". Variable interna `supabase_results` renombrada a `db_results`. El valor `"source": "supabase"` del endpoint `/api/accuracy` cambió a `"source": "neon"`. |
 | `.env.example` | **Antes estaba vacío.** Ahora poblado con plantilla Neon (host, puerto 5432, URL de ejemplo, resto de config). |
+| `requirements.txt` | **Bug preexistente corregido:** se añadieron `fastapi`, `uvicorn` y `xgboost`. `reconcile.py` importa `web.app`, que importa `fastapi`; en CI (runner limpio) `pip install -r requirements.txt` no los instalaba → `ModuleNotFoundError: No module named 'fastapi'` → el workflow `reconcile.yml` fallaba TODOS los días. Este era el error real que impedía la automatización, independiente de la migración. |
 
 ## 3. Archivos creados
 
@@ -58,7 +59,8 @@ Ninguno. Los `supabase_setup.sql` (duplicados en `database/` y `sports/nba/datab
 
 ## 9. Riesgos detectados
 
-- 🔴 **Bug preexistente corregido:** la vista `v_backtest_history` no se creaba automáticamente porque usaba columnas inexistentes (`p.home_team`/`p.away_team`). En Supabase la vista real se creaba vía `supabase_setup.sql` (con la versión correcta por team_id), por eso nunca se notó. Ahora ambos repos usan las columnas correctas. **Esto es un cambio de comportamiento positivo**, pero el PKE debe conocerlo.
+- 🔴 **Bug preexistente corregido (CI):** `requirements.txt` no incluía `fastapi`, `uvicorn`, `xgboost`. Como `reconcile.py` importa `web.app` (que importa fastapi), el workflow `reconcile.yml` fallaba en CI con `ModuleNotFoundError`. Esto hacía fallar la reconciliación **todos los días** (runs #4-69). Corregido añadiendo las 3 dependencias. **Se recomienda verificar que `daily_pipeline.yml` y `atp_pipeline.yml` también pasen en CI**, pues dependen de las mismas librerías.
+- 🔴 **Bug preexistente corregido (vista):** la vista `v_backtest_history` no se creaba automáticamente porque usaba columnas inexistentes (`p.home_team`/`p.away_team`). En Supabase la vista real se creaba vía `supabase_setup.sql` (con la versión correcta por team_id), por eso nunca se notó. Ahora ambos repos usan las columnas correctas. **Esto es un cambio de comportamiento positivo**, pero el PKE debe conocerlo.
 - 🟡 **`channel_binding=require` omitido de la URL:** se descartó para compatibilidad con `psycopg2-binary`. La conexión verificada funciona sin él. Si Neon llegara a requerirlo en el futuro, habría que habilitarlo.
 - 🟡 **Credenciales compartidas en chat:** el usuario compartió el password de Neon y claves S3/AI Gateway en la conversación. Recomendación de seguridad: rotar el password de Neon si el chat no es privado.
 - 🟡 **`.env` no versionado:** la nueva URL vive solo en `.env` local y en el secreto de GitHub. Si se pierde el archivo, hay que reconfigurarlo manualmente (mitigado por el `.env.example` ahora poblado).
@@ -70,7 +72,7 @@ Ninguno. Los `supabase_setup.sql` (duplicados en `database/` y `sports/nba/datab
 1. **`ai/arquitectura.md`:** cambiar fila "Base de datos | PostgreSQL (Supabase) | Puerto 6543 (Transaction Pooler)" → "PostgreSQL (Neon) | Puerto 5432 (sslmode=require)".
 2. **`ai/modulos/database.md`:** reemplazar todas las referencias a "Supabase" y "puerto 6543" por "Neon" y "puerto 5432". Documentar el nuevo `neon_setup.sql`. Documentar el bug de la vista `v_backtest_history` corregido.
 3. **`ai/modulos/config.md`:** actualizar el ejemplo de `.env` con host de Neon y la URL de ejemplo.
-4. **`ai/modulos/github_actions.md`:** actualizar el formato del secreto `DATABASE_URL` (ahora Neon con `?sslmode=require`).
+4. **`ai/modulos/github_actions.md`:** actualizar el formato del secreto `DATABASE_URL` (ahora Neon con `?sslmode=require`). Documentar el fix de `requirements.txt` (fastapi/uvicorn/xgboost) para que CI no falle.
 5. **`ai/modulos/web_dashboard.md` / `pipeline_nba.md` / `pipeline_atp.md`:** reemplazar menciones a "Supabase" por "Neon" (manteniendo la nota de que ATP no persiste en BD).
 6. **`ai/README.md`:** actualizar la descripción del sistema y la tabla de stack (Supabase → Neon).
 
@@ -80,4 +82,5 @@ Ninguno. Los `supabase_setup.sql` (duplicados en `database/` y `sports/nba/datab
 - `Base.metadata.create_all`: creó 7 tablas correctamente.
 - Vistas `v_model_accuracy` y `v_backtest_history`: creadas correctamente tras la corrección del bug.
 - Upsert real (`upsert_teams`): 1 fila escrita y releída desde Neon OK.
-- Quedó **pendiente de acción del usuario**: actualizar el secreto `DATABASE_URL` en GitHub Actions Settings (ver sección 8/9). El PKE debe anotar este paso como pendiente operativo hasta que el usuario confirme.
+- **Workflow `reconcile.yml` en GitHub Actions:** run #70 falló con `ModuleNotFoundError: No module named 'fastapi'` (confirmaba el bug de requirements). Tras añadir las dependencias y hacer push (commit `f9c7745`), el run #71 **completó con éxito** (todos los pasos `success`, 42s). El secreto `DATABASE_URL` de GitHub ya apunta a Neon (el run no falló al conectar).
+- **Pendiente:** verificar que `daily_pipeline.yml` y `atp_pipeline.yml` pasen en CI (dependen de las mismas librerías y del flujo de predicción completo). Se recomienda dispararlos manualmente desde Actions.
