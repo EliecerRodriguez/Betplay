@@ -1,7 +1,7 @@
 """
 Capa de acceso a datos (DAL).
 
-Gestiona la conexión a PostgreSQL/Supabase y las operaciones de escritura
+Gestiona la conexión a PostgreSQL/Neon y las operaciones de escritura
 con deduplicación basada en las claves únicas definidas en models.py.
 
 Uso típico:
@@ -82,8 +82,8 @@ class DatabaseRepository:
         SELECT
             p.game_id,
             p.game_date,
-            p.home_team,
-            p.away_team,
+            p.home_team_id,
+            p.visitor_team_id,
             p.predicted_winner,
             p.home_win_prob,
             p.away_win_prob,
@@ -114,7 +114,7 @@ class DatabaseRepository:
                 for stmt in self._SETUP_SQL:
                     conn.execute(text(stmt.strip()))
                 conn.commit()
-            logger.info("Migraciones y vistas Supabase aplicadas correctamente")
+            logger.info("Migraciones y vistas Neon aplicadas correctamente")
         except Exception as exc:
             # No es fatal — puede fallar si el driver no soporta DDL o no hay permisos
             logger.warning("No se pudieron aplicar migraciones automáticas: %s", exc)

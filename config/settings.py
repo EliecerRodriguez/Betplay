@@ -7,7 +7,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Base de datos (Supabase / PostgreSQL) ───────────────────────────────────
+# ── Base de datos (Neon / PostgreSQL) ──────────────────────────────────────
+# Neon es PostgreSQL serverless. La cadena DATABASE_URL tiene precedencia
+# sobre los campos individuales (DB_HOST/DB_PORT/...). Usa puerto 5432.
 DB_HOST     = os.getenv("DB_HOST", "localhost")
 DB_PORT     = int(os.getenv("DB_PORT", "5432") or "5432")
 DB_NAME     = os.getenv("DB_NAME", "betplay")

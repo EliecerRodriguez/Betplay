@@ -109,7 +109,7 @@ _ODDS_TTL = 30 * 60   # 30 minutos
 _ATP_CACHE: dict[str, dict] = {}
 _ATP_CACHE_TTL = 10 * 60
 
-# ── Persistencia (Supabase / PostgreSQL) ─────────────────────────────────────
+# ── Persistencia (Neon / PostgreSQL) ────────────────────────────────────────
 
 _repo = None   # singleton lazy — se inicializa en el primer request
 
@@ -124,7 +124,7 @@ def _get_repo():
     try:
         from sports.nba.database.repository import DatabaseRepository
         _repo = DatabaseRepository(DATABASE_URL)
-        logger.info("Repositorio BD conectado a Supabase")
+        logger.info("Repositorio BD conectado a Neon")
     except Exception as exc:
         logger.warning("BD no disponible (%s) — la app funciona sin persistencia", exc)
         _repo = None
@@ -138,7 +138,7 @@ def _persist_to_db(
     value_bets_df: "pd.DataFrame",
     date_str: str,
 ) -> None:
-    """Persiste los DataFrames del pipeline en Supabase. Se ejecuta en hilo separado."""
+    """Persiste los DataFrames del pipeline en Neon. Se ejecuta en hilo separado."""
     repo = _get_repo()
     if repo is None:
         return
@@ -176,7 +176,7 @@ def _persist_to_db(
             if "game_date" not in vdf.columns:
                 vdf["game_date"] = today
             repo.upsert_value_bets(vdf)
-        logger.info("Persistencia Supabase completada para %s", date_str)
+        logger.info("Persistencia Neon completada para %s", date_str)
     except Exception as exc:
         logger.warning("Error persitiendo en BD para %s: %s", date_str, exc)
 
@@ -445,7 +445,7 @@ def _run_pipeline(date_str: str) -> dict:
         except Exception as exc:
             logger.warning("detect_value_bets falló: %s", exc)
 
-    # 6. Persistir en Supabase en background (no bloquea la respuesta)
+    # 6. Persistir en Neon en background (no bloquea la respuesta)
     try:
         from concurrent.futures import ThreadPoolExecutor as _TPE
         _TPE(max_workers=1).submit(
@@ -1270,7 +1270,7 @@ def _fetch_and_reconcile_results() -> int:
         except Exception as exc:
             logger.warning("No se pudo guardar predictions.csv: %s", exc)
 
-        # ── Persistir en Supabase ─────────────────────────────────────────────
+        # ── Persistir en Neon ────────────────────────────────────────────────
         try:
             from sports.nba.database.repository import DatabaseRepository
             repo = DatabaseRepository()
@@ -1285,9 +1285,9 @@ def _fetch_and_reconcile_results() -> int:
             if not rows_to_update.empty:
                 repo.upsert_prediction_results(rows_to_update)
             repo.close()
-            logger.info("Supabase actualizado: %d resultados sincronizados", updated)
+            logger.info("Neon actualizado: %d resultados sincronizados", updated)
         except Exception as exc:
-            logger.warning("No se pudo actualizar Supabase con resultados: %s", exc)
+            logger.warning("No se pudo actualizar Neon con resultados: %s", exc)
 
     return updated
 
@@ -1413,9 +1413,9 @@ def reconcile_results():
 def get_accuracy():
     """
     Calcula el % de acierto real del modelo sobre predicciones con resultado conocido.
-    Lee primero desde Supabase (vista v_model_accuracy); si no está disponible, lee CSV.
+    Lee primero desde Neon (vista v_model_accuracy); si no está disponible, lee CSV.
     """
-    # ── Intentar Supabase ─────────────────────────────────────────────────────
+    # ── Intentar Neon ─────────────────────────────────────────────────────────
     try:
         from config.settings import DATABASE_URL
         if DATABASE_URL:
@@ -1437,13 +1437,13 @@ def get_accuracy():
                 all_accs = [v["accuracy_pct"] for v in by_model.values() if v["accuracy_pct"]]
                 overall  = round(sum(all_accs) / len(all_accs), 1) if all_accs else None
                 return {
-                    "source":            "supabase",
+                    "source":            "neon",
                     "total_with_result": total,
                     "accuracy_pct":      overall,
                     "by_model":          by_model,
                 }
     except Exception as exc:
-        logger.debug("accuracy: Supabase no disponible, usando CSV: %s", exc)
+        logger.debug("accuracy: Neon no disponible, usando CSV: %s", exc)
 
     # ── Fallback: CSV local ───────────────────────────────────────────────────
     pred_path = os.path.join(_BASE_DIR, "output", "predictions.csv")
@@ -1527,10 +1527,10 @@ def get_backtest(bankroll: float = Query(default=500_000), period: str = Query(d
     pred_path    = os.path.join(BASE, "output", "predictions.csv")
     ls_path      = os.path.join(BASE, "output", "line_scores.csv")
 
-    # ── Intentar enriquecer resultados desde Supabase (v_backtest_history) ───
-    # Si Supabase tiene datos de home_win mas actualizados que el CSV local,
+    # ── Intentar enriquecer resultados desde Neon (v_backtest_history) ───────
+    # Si Neon tiene datos de home_win mas actualizados que el CSV local,
     # los usamos para resolver apuestas pendientes.
-    supabase_results: dict[str, int] = {}  # game_id -> home_win (0 o 1)
+    db_results: dict[str, int] = {}  # game_id -> home_win (0 o 1)
     try:
         from config.settings import DATABASE_URL
         if DATABASE_URL:
@@ -1540,11 +1540,11 @@ def get_backtest(bankroll: float = Query(default=500_000), period: str = Query(d
                 rows = conn.execute(
                     text("SELECT game_id, actual_result FROM v_backtest_history WHERE actual_result IS NOT NULL")
                 ).mappings().all()
-            supabase_results = {r["game_id"]: int(r["actual_result"]) for r in rows}
-            if supabase_results:
-                logger.debug("backtest: %d resultados cargados desde Supabase", len(supabase_results))
+            db_results = {r["game_id"]: int(r["actual_result"]) for r in rows}
+            if db_results:
+                logger.debug("backtest: %d resultados cargados desde Neon", len(db_results))
     except Exception as exc:
-        logger.debug("backtest: Supabase no disponible para resultados, usando CSV: %s", exc)
+        logger.debug("backtest: Neon no disponible para resultados, usando CSV: %s", exc)
 
     # ── Cargar journal ────────────────────────────────────────────────────────
     if not os.path.exists(journal_path):
@@ -1612,8 +1612,8 @@ def get_backtest(bankroll: float = Query(default=500_000), period: str = Query(d
             # no registrar resultado para evitar falsos positivos/negativos.
             actual_totals[gid_str] = float(grp["pts"].sum())
 
-    # Enriquecer con resultados de Supabase (tienen prioridad si estan disponibles)
-    for gid, hw in supabase_results.items():
+    # Enriquecer con resultados de Neon (tienen prioridad si estan disponibles)
+    for gid, hw in db_results.items():
         actual_winner[gid] = "home" if hw == 1 else "away"
 
     # ── Construir registros desde el journal ──────────────────────────────────

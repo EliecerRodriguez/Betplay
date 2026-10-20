@@ -279,9 +279,9 @@ def save_to_csv(data: dict[str, pd.DataFrame], append: bool = True) -> None:
                 logger.info("  ✓ %s guardado (%d filas)", path, len(df))
 
 
-def save_to_supabase(data: dict[str, pd.DataFrame]) -> None:
+def save_to_database(data: dict[str, pd.DataFrame]) -> None:
     """
-    Sincroniza todos los DataFrames del pipeline con Supabase/PostgreSQL.
+    Sincroniza todos los DataFrames del pipeline con Neon/PostgreSQL.
 
     Se llama despues de save_to_csv() en el flujo de produccion.
     Falla de forma silenciosa para no interrumpir el pipeline si la BD no esta
@@ -290,7 +290,7 @@ def save_to_supabase(data: dict[str, pd.DataFrame]) -> None:
     try:
         from config.settings import DATABASE_URL
         if not DATABASE_URL:
-            logger.debug("DATABASE_URL no configurado — omitiendo escritura en Supabase")
+            logger.debug("DATABASE_URL no configurado — omitiendo escritura en BD")
             return
     except Exception:
         return
@@ -312,9 +312,9 @@ def save_to_supabase(data: dict[str, pd.DataFrame]) -> None:
             repo.upsert_value_bets(data["value_bets"])
 
         repo.close()
-        logger.info("Supabase sincronizado correctamente")
+        logger.info("Neon sincronizado correctamente")
     except Exception as exc:
-        logger.warning("No se pudo sincronizar con Supabase (no critico): %s", exc)
+        logger.warning("No se pudo sincronizar con Neon (no critico): %s", exc)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -330,7 +330,7 @@ def main() -> int:
 
     data = run(date_str)
     save_to_csv(data, append=append)
-    save_to_supabase(data)
+    save_to_database(data)
 
     # Descargar resultados reales de partidos pasados para alimentar el módulo de Resultados
     try:
