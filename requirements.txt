@@ -11,6 +11,11 @@ numpy>=1.26.0
 # ── HTTP (Odds API) ───────────────────────────────────────────────────────────
 requests>=2.31.0
 
+# ── Web Dashboard (FastAPI) ──────────────────────────────────────────────────
+# reconcile.py importa web.app, que requiere fastapi/uvicorn en CI.
+fastapi>=0.110.0
+uvicorn>=0.29.0
+
 # ── Database (Fase 2) ─────────────────────────────────────────────────────────
 psycopg2-binary>=2.9.9
 sqlalchemy>=2.0.0
@@ -20,6 +25,7 @@ scikit-learn>=1.4.0
 joblib>=1.3.0
 pyarrow>=14.0.0      # caché de partidos históricos en formato parquet
 optuna>=3.6.0        # optimización bayesiana de hiperparámetros XGBoost
+xgboost>=2.0.0       # clasificador principal (predictor.py)
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 pytest>=8.0.0
