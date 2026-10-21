@@ -420,12 +420,30 @@ async function loadModelHealth() {
     const r = await fetch('/api/model_health');
     if (!r.ok) throw new Error(await r.text());
     const data = await r.json();
+
+    // Versión activa real (la que usa el pipeline, auto-detectada)
+    const activeVer = data.active_version || '—';
+
     let health = null;
     if (data.source === 'neon' && data.latest && data.latest.length) {
-      // Usar el registro más reciente del modelo en producción (el de más datos)
-      health = data.latest[0];
+      // Buscar el registro del modelo ACTIVO (no el primero de la lista)
+      health = data.latest.find(h => h.model_version === activeVer) || data.latest[0];
     } else if (data.source === 'live' && data.health) {
-      health = data.health;
+      // En vivo: buscar en by_model el modelo activo si existe
+      const byModel = data.health.by_model;
+      if (byModel && activeVer !== '—' && byModel[activeVer]) {
+        const m = byModel[activeVer];
+        health = {
+          model_version: activeVer,
+          total: m.total,
+          correct: m.correct,
+          accuracy_pct: m.accuracy_pct,
+          recent_accuracy_pct: m.recent_accuracy_pct,
+          drift_pct: m.drift_pct,
+          drift_detected: m.drift_detected,
+          buckets: m.buckets,
+        };
+      }
     }
     if (!health) { el.innerHTML = ''; return; }
 
@@ -451,10 +469,14 @@ async function loadModelHealth() {
       }).join('');
     }
 
+    // Si el registro corresponde al modelo activo
+    const isActive = health.model_version === activeVer;
+    const activeBadge = isActive ? ' <span style="font-size:9px;background:rgba(0,230,118,.15);color:var(--green);border:1px solid rgba(0,230,118,.3);padding:1px 6px;border-radius:10px;font-weight:700">ACTIVO</span>' : '';
+
     el.innerHTML = `
       <div class="stat-card s-blue" style="min-width:150px">
         <div class="s-label">Modelo activo</div>
-        <div class="s-val" style="font-size:16px">${health.model_version || '—'}</div>
+        <div class="s-val" style="font-size:16px">${activeVer}${activeBadge}</div>
         <div class="s-sub">${health.total || 0} pred. resueltas</div>
       </div>
       <div class="stat-card s-purple">

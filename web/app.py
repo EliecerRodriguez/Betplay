@@ -621,11 +621,19 @@ def _build_response(date_str, games_df, predictions_df, odds_df, value_bets_df) 
 
 def _log_bets_to_journal(data: dict, bankroll: float) -> None:
     """Guarda en output/bet_journal.csv los partidos con valor detectado.
-    Solo escribe entradas nuevas (no duplica si el (game_id, predicted_side) ya existe)."""
+    Solo escribe entradas nuevas (no duplica si el (game_id, predicted_side) ya existe).
+    Limita el número de apuestas por día (MAX_BETS_PER_DAY) y expone a lo sumo
+    MAX_BANKROLL_EXPOSURE del bankroll para no sobre-apostar."""
     BASE         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     journal_path = os.path.join(BASE, "output", "bet_journal.csv")
     date_str     = data.get("date", "")
-    model_ver    = os.environ.get("MODEL_VERSION", "?")
+    try:
+        from sports.nba.model.predictor import _latest_model_version
+        model_ver = _latest_model_version()
+    except Exception:
+        model_ver = os.environ.get("MODEL_VERSION", "?")
+    max_bets     = int(os.environ.get("MAX_BETS_PER_DAY", "5"))
+    max_exposure = float(os.environ.get("MAX_BANKROLL_EXPOSURE", "0.25"))
 
     # Leer journal existente
     existing_keys: set[tuple] = set()  # (game_id, predicted_side)
@@ -641,8 +649,18 @@ def _log_bets_to_journal(data: dict, bankroll: float) -> None:
         except Exception:
             pass
 
+    # Apuestas ya registradas HOY (para no exceder el límite diario acumulado)
+    today_bets = [
+        r for r in rows
+        if str(r.get("game_date", ""))[:10] == date_str
+    ]
+    slots_used = len(today_bets)
+
     logged_dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     new_rows: list[dict] = []
+
+    # ── Recolectar TODAS las apuestas candidatas (moneyline + totals) ────────
+    candidates: list[dict] = []
 
     for game in data.get("games", []):
         gid = str(game.get("game_id", ""))
@@ -661,9 +679,7 @@ def _log_bets_to_journal(data: dict, bankroll: float) -> None:
         for side, vb in best_per_side.items():
             if (gid, side) in existing_keys:
                 continue
-            bet_amount     = max(1, round(bankroll * vb["kelly_pct"] / 200))
-            potential_gain = round(bet_amount * (vb["odds"] - 1))
-            new_rows.append({
+            candidates.append({
                 "game_id":           gid,
                 "game_date":         date_str,
                 "logged_date":       logged_dt,
@@ -676,10 +692,9 @@ def _log_bets_to_journal(data: dict, bankroll: float) -> None:
                 "odds":              vb["odds"],
                 "kelly_pct":         vb["kelly_pct"],
                 "bankroll_snapshot": bankroll,
-                "bet_amount":        bet_amount,
-                "potential_gain":    potential_gain,
                 "bet_type":          "moneyline",
                 "total_line":        "",
+                "_prob_sort":        vb["model_prob_pct"],
             })
             existing_keys.add((gid, side))
 
@@ -695,10 +710,8 @@ def _log_bets_to_journal(data: dict, bankroll: float) -> None:
         for side, vb in best_totals.items():
             if (gid, side) in existing_keys:
                 continue
-            bet_amount     = max(1, round(bankroll * vb["kelly_pct"] / 200))
-            potential_gain = round(bet_amount * (vb["odds"] - 1))
             tl = vb.get("total_line")
-            new_rows.append({
+            candidates.append({
                 "game_id":           gid,
                 "game_date":         date_str,
                 "logged_date":       logged_dt,
@@ -711,16 +724,50 @@ def _log_bets_to_journal(data: dict, bankroll: float) -> None:
                 "odds":              vb["odds"],
                 "kelly_pct":         vb["kelly_pct"],
                 "bankroll_snapshot": bankroll,
-                "bet_amount":        bet_amount,
-                "potential_gain":    potential_gain,
                 "bet_type":          "total",
                 "total_line":        tl if tl is not None else "",
+                "_prob_sort":        vb["model_prob_pct"],
             })
             existing_keys.add((gid, side))
+
+    # ── Aplicar límite: ordenar por confianza y quedarse con las mejores ──────
+    candidates.sort(key=lambda c: c["_prob_sort"], reverse=True)
+    max_new = max(0, max_bets - slots_used)
+    selected = candidates[:max_new]
+
+    if candidates and not selected:
+        logger.warning(
+            "Límite diario alcanzado (%d apuestas para %s) — %d candidatas descartadas",
+            max_bets, date_str, len(candidates),
+        )
+
+    # ── Calcular montos: presupuesto = bankroll × exposición, repartido ──────
+    if selected:
+        budget = bankroll * max_exposure
+        # Peso: kelly_pct normalizado (las de mayor confianza reciben más)
+        total_kelly = sum(max(1.0, c["kelly_pct"]) for c in selected)
+        for c in selected:
+            weight = max(1.0, c["kelly_pct"]) / total_kelly
+            bet_amount = max(1, round(budget * weight))
+            c["bet_amount"] = bet_amount
+            c["potential_gain"] = round(bet_amount * (c["odds"] - 1))
+            # Eliminar campo interno de ordenación
+            c.pop("_prob_sort", None)
+            new_rows.append(c)
+    elif candidates:
+        logger.warning(
+            "No se registraron nuevas apuestas para %s (límite diario alcanzado o sin candidatas)",
+            date_str,
+        )
 
     if new_rows:
         all_rows = rows + new_rows
         pd.DataFrame(all_rows).to_csv(journal_path, index=False)
+        logger.info(
+            "Journal actualizado: %d nuevas apuestas para %s (límite %d/día). "
+            "Exposición total: %.1f%% del bankroll",
+            len(new_rows), date_str, max_bets, max_exposure * 100,
+        )
 
 
 def _log_atp_bets_to_journal(data: dict, bankroll: float) -> None:
@@ -1419,6 +1466,12 @@ def get_model_health():
     Lee desde Neon (tabla model_health, generada por utils/model_monitor.py).
     Si no hay datos, calcula en vivo con compute_health(dry_run=True).
     """
+    # Versión activa real (auto-detectada por predictor)
+    try:
+        from sports.nba.model.predictor import _latest_model_version
+        active_version = _latest_model_version()
+    except Exception:
+        active_version = os.environ.get("MODEL_VERSION", "?")
     try:
         from config.settings import DATABASE_URL
         if DATABASE_URL:
@@ -1435,6 +1488,7 @@ def get_model_health():
             if rows:
                 return {
                     "source": "neon",
+                    "active_version": active_version,
                     "latest": [dict(r) for r in rows],
                 }
     except Exception as exc:
@@ -1444,10 +1498,10 @@ def get_model_health():
     try:
         from utils.model_monitor import compute_health
         health = compute_health(dry_run=True)
-        return {"source": "live", "health": health}
+        return {"source": "live", "active_version": active_version, "health": health}
     except Exception as exc:
         logger.warning("model_health: no se pudo calcular: %s", exc)
-        return {"source": "none", "error": str(exc)}
+        return {"source": "none", "active_version": active_version, "error": str(exc)}
 
 
 @app.get("/api/model_registry")
