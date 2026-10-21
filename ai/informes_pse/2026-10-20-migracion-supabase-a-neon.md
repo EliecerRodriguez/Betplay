@@ -3,6 +3,8 @@
 **Fecha:** 2026-10-20
 **Tarea solicitada por el usuario:** Migrar la base de datos de Supabase (plan gratuito, se borró) a Neon PostgreSQL, manteniendo la funcionalidad de NBA y ATP sin cambios.
 
+> **Actualización (mismo día, commit `243f907`):** se corrigieron 3 bugs en el dashboard NBA que impedían que la sección "Resultados" mostrara los resultados reales. Detalle en la sección 11 al final.
+
 ## 1. Objetivo del cambio
 
 Reemplazar Supabase (PostgreSQL) como backend de persistencia por **Neon PostgreSQL serverless**, porque la instancia gratuita de Supabase se eliminó sin previo aviso y el usuario perdió la base de datos. La migración debía ser transparente para NBA y ATP (sin cambios de funcionalidad), manteniendo GitHub Actions como orquestador y arrancando desde cero (sin migración de datos).
@@ -84,3 +86,37 @@ Ninguno. Los `supabase_setup.sql` (duplicados en `database/` y `sports/nba/datab
 - Upsert real (`upsert_teams`): 1 fila escrita y releída desde Neon OK.
 - **Workflow `reconcile.yml` en GitHub Actions:** run #70 falló con `ModuleNotFoundError: No module named 'fastapi'` (confirmaba el bug de requirements). Tras añadir las dependencias y hacer push (commit `f9c7745`), el run #71 **completó con éxito** (todos los pasos `success`, 42s). El secreto `DATABASE_URL` de GitHub ya apunta a Neon (el run no falló al conectar).
 - **Pendiente:** verificar que `daily_pipeline.yml` y `atp_pipeline.yml` pasen en CI (dependen de las mismas librerías y del flujo de predicción completo). Se recomienda dispararlos manualmente desde Actions.
+
+---
+
+## 11. Actualización — Fixes del dashboard NBA (commit `243f907`)
+
+**Contexto:** el usuario reportó que la sección "Resultados" del dashboard no mostraba los resultados de los partidos ya jugados (2026-10-20). Se diagnosticaron y corrigieron 3 bugs en `web/app.py`:
+
+### 11.1 Bug crítico: backtest consultaba columna inexistente en vista Neon
+
+- **Síntoma:** la sección Resultados (endpoint `/api/backtest`) no resolvía las apuestas de partidos recientes; quedaban "pendientes" aunque ya había resultado.
+- **Causa raíz:** `web/app.py` consultaba `SELECT game_id, actual_result FROM v_backtest_history`, pero la vista creada por el repositorio (`_SETUP_SQL` en `database/repository.py` y `sports/nba/database/repository.py`) expone la columna **`home_win`** (y `result` para el outcome), **no** `actual_result`. La excepción `UndefinedColumn` se capturaba con `except Exception` y se ignoraba → el backtest caía al fallback de `line_scores.csv`, que estaba **desactualizado desde junio 2026**.
+- **Fix:** usar `home_win` en la consulta y en el mapeo.
+- **Verificado:** las 5 apuestas de 2026-10-20 ahora se resuelven (2 wins, 3 losses correctos).
+
+### 11.2 Bug: accuracy consultaba columnas inexistentes
+
+- **Síntoma:** `/api/accuracy` caía silenciosamente al fallback CSV.
+- **Causa raíz:** consultaba `resolved_predictions` y `avg_prob_error` en `v_model_accuracy`, pero la vista del repo expone `total_with_result` y `correct`.
+- **Fix:** usar las columnas reales de la vista del repositorio.
+- **Verificado:** `/api/accuracy` ahora responde `source: neon` con 35 predicciones resueltas.
+
+### 11.3 Bug: reconciliación excluía partidos de HOY
+
+- **Síntoma:** las predicciones de hoy (ya jugadas) nunca se reconciliaban.
+- **Causa raíz:** `_fetch_and_reconcile_results` filtraba con `game_date < today_str`, excluyendo el día actual.
+- **Fix:** usar `<= today_str`. No hay riesgo de reconciliar partidos futuros del mismo día porque `get_line_scores` devuelve vacío para partidos no jugados.
+
+### 11.4 Nota importante para el PKE
+
+Las vistas en Neon son las del `_SETUP_SQL` del repositorio (se recrean en cada arranque con `CREATE OR REPLACE VIEW`), **no** las de `database/neon_setup.sql`. Cualquier consulta a vistas debe usar las columnas del repo:
+- `v_backtest_history`: `game_id, game_date, home_team_id, visitor_team_id, predicted_winner, home_win_prob, away_win_prob, home_win, model_version, result`
+- `v_model_accuracy`: `model_version, total_games, total_with_result, accuracy_pct, correct`
+
+Se recomienda **unificar** `database/neon_setup.sql` con el `_SETUP_SQL` del repositorio para evitar divergencias futuras (o eliminar el SQL duplicado).
