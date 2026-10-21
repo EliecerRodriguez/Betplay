@@ -59,7 +59,6 @@ jobs:
           DATABASE_URL:  ${{ secrets.DATABASE_URL }}
           ODDS_API_KEY:  ${{ secrets.ODDS_API_KEY }}
           NBA_SEASON:    ${{ github.event.inputs.season || '2025-26' }}
-          MODEL_VERSION: v11
           MODEL_TYPE:    xgboost
           LOG_LEVEL:     INFO
           PYTHONPATH:    ${{ github.workspace }}

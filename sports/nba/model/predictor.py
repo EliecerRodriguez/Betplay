@@ -95,8 +95,15 @@ _FEATURE_DEFAULTS: dict[str, float] = {
 
 
 def _latest_model_version() -> str:
-    """Auto-detecta la versión más reciente disponible en MODEL_DIR."""
-    env_version = os.getenv("MODEL_VERSION", "")
+    """Auto-detecta la versión más reciente disponible en MODEL_DIR.
+
+    Prioridad:
+      1. Variable de entorno MODEL_VERSION (si está definida y no vacía).
+      2. El joblib con fecha de modificación MÁS RECIENTE (no el número más
+         alto: v9 > v10 numéricamente, pero v10 es más nuevo).
+      3. Fallback: v5 (último modelo conocido).
+    """
+    env_version = os.getenv("MODEL_VERSION", "").strip()
     if env_version:
         return env_version
     try:
@@ -104,15 +111,12 @@ def _latest_model_version() -> str:
         pattern = os.path.join(MODEL_DIR, "nba_model_v*.joblib")
         files = glob.glob(pattern)
         if files:
-            # Extraer número de versión y devolver el mayor
-            versions = []
-            for f in files:
-                name = os.path.basename(f)
-                num = name.replace("nba_model_v", "").replace(".joblib", "")
-                if num.isdigit():
-                    versions.append(int(num))
-            if versions:
-                return f"v{max(versions)}"
+            # Elegir el archivo con mtime más reciente (modelo más nuevo)
+            newest = max(files, key=os.path.getmtime)
+            name = os.path.basename(newest)
+            num = name.replace("nba_model_v", "").replace(".joblib", "")
+            if num.isdigit():
+                return f"v{int(num)}"
     except Exception:
         pass
     return "v5"   # fallback explícito al último modelo conocido
