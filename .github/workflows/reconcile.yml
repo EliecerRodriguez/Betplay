@@ -51,6 +51,15 @@ jobs:
              "Connection": "keep-alive"}
         run: python reconcile.py
 
+      # ── Monitor de salud del modelo (drift + calibración) ──────────────────
+      # Se ejecuta tras reconciliar para que el drift se calcule con datos frescos.
+      - name: Run model health monitor
+        env:
+          DATABASE_URL:  ${{ secrets.DATABASE_URL }}
+          PYTHONPATH:    ${{ github.workspace }}
+          LOG_LEVEL:     INFO
+        run: python utils/model_monitor.py
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4.6.2

@@ -1410,6 +1410,46 @@ def reconcile_results():
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/api/model_health")
+def get_model_health():
+    """
+    Devuelve la salud del modelo: accuracy acumulado, accuracy reciente,
+    drift detectado y calibración por bucket de confianza.
+
+    Lee desde Neon (tabla model_health, generada por utils/model_monitor.py).
+    Si no hay datos, calcula en vivo con compute_health(dry_run=True).
+    """
+    try:
+        from config.settings import DATABASE_URL
+        if DATABASE_URL:
+            from sqlalchemy import create_engine, text
+            eng = create_engine(DATABASE_URL, pool_pre_ping=True)
+            with eng.connect() as conn:
+                rows = conn.execute(text("""
+                    SELECT generated_at, model_version, total, correct, accuracy_pct,
+                           recent_total, recent_correct, recent_accuracy_pct,
+                           drift_pct, drift_detected, buckets
+                    FROM model_health
+                    ORDER BY generated_at DESC, model_version
+                """)).mappings().all()
+            if rows:
+                return {
+                    "source": "neon",
+                    "latest": [dict(r) for r in rows],
+                }
+    except Exception as exc:
+        logger.debug("model_health: Neon no disponible (%s) — calculando en vivo", exc)
+
+    # Fallback: calcular en vivo (no persiste)
+    try:
+        from utils.model_monitor import compute_health
+        health = compute_health(dry_run=True)
+        return {"source": "live", "health": health}
+    except Exception as exc:
+        logger.warning("model_health: no se pudo calcular: %s", exc)
+        return {"source": "none", "error": str(exc)}
+
+
 @app.get("/api/accuracy")
 def get_accuracy():
     """
