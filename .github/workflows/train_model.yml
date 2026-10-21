@@ -59,7 +59,7 @@ jobs:
         env:
           PYTHONPATH:    ${{ github.workspace }}
           NBA_SEASON:    "2025-26"
-          NBA_API_TIMEOUT: "60"
+          NBA_API_TIMEOUT: "120"
           NBA_DATA_HEADERS: >-
             {"Host": "stats.nba.com",
              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",

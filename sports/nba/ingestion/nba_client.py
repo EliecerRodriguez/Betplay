@@ -43,6 +43,39 @@ def _sleep() -> None:
     time.sleep(NBA_API_DELAY)
 
 
+def _retry(fn, retries: int = 3, base_delay: float = 5.0, timeout: int = 120) -> "pd.DataFrame":
+    """
+    Ejecuta fn() con reintentos y backoff exponencial.
+
+    stats.nba.com es inestable desde IPs de nube (GitHub Actions): a veces
+    tarda >60s o devuelve timeout. Con reintentos + backoff se mitiga.
+
+    Args:
+        fn:          Callable que devuelve un DataFrame (o lanza excepción).
+        retries:     Número de reintentos tras el primer intento.
+        base_delay:  Segundos base para el backoff (5, 10, 20...).
+        timeout:     Timeout HTTP en segundos por intento.
+
+    Returns:
+        DataFrame con el resultado de fn().
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(retries + 1):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < retries:
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    "nba_api: intento %d/%d falló (%s). Reintentando en %.0fs…",
+                    attempt + 1, retries + 1, exc, delay,
+                )
+                time.sleep(delay)
+    logger.error("nba_api: agotados %d intentos: %s", retries + 1, last_exc)
+    return pd.DataFrame()
+
+
 def _today_str() -> str:
     return date.today().strftime("%Y-%m-%d")
 
@@ -175,19 +208,24 @@ def get_team_stats(season: Optional[str] = None) -> pd.DataFrame:
 
     logger.info("Obteniendo estadísticas de equipo para la temporada: %s", season)
 
-    try:
+    def _fetch() -> "pd.DataFrame":
         stats = LeagueDashTeamStats(
             season=season,
             per_mode_detailed="PerGame",   # promedios por partido
             timeout=NBA_API_TIMEOUT,
         )
         _sleep()
-
         df: pd.DataFrame = stats.league_dash_team_stats.get_data_frame()
         df.columns = [c.lower() for c in df.columns]
         df["season"] = season
         df["fetch_date"] = _today_str()
+        return df
 
+    try:
+        df = _retry(_fetch)
+        if df.empty:
+            logger.error("No se pudieron obtener estadísticas de equipo (timeout persistente)")
+            return df
         logger.info("Estadísticas obtenidas para %d equipos", len(df))
         return df
 
@@ -225,7 +263,7 @@ def get_team_advanced_stats(season: Optional[str] = None) -> pd.DataFrame:
 
     logger.info("Obteniendo estadísticas avanzadas para la temporada: %s", season)
 
-    try:
+    def _fetch() -> "pd.DataFrame":
         stats = LeagueDashTeamStats(
             season=season,
             measure_type_detailed_defense="Advanced",
@@ -233,11 +271,17 @@ def get_team_advanced_stats(season: Optional[str] = None) -> pd.DataFrame:
             timeout=NBA_API_TIMEOUT,
         )
         _sleep()
-
         df: pd.DataFrame = stats.league_dash_team_stats.get_data_frame()
         df.columns = [c.lower() for c in df.columns]
         df["season"] = season
         df["fetch_date"] = _today_str()
+        return df
+
+    try:
+        df = _retry(_fetch)
+        if df.empty:
+            logger.warning("No se pudieron obtener estadísticas avanzadas (timeout persistente)")
+            return df
 
         # Columnas relevantes para el modelo
         keep_cols = ["team_id", "off_rating", "def_rating", "net_rating",
