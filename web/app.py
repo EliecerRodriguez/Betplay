@@ -1148,7 +1148,8 @@ def _fetch_and_reconcile_results() -> int:
         logger.warning("_fetch_and_reconcile_results: no se pudo leer predictions.csv: %s", exc)
         return 0
 
-    # Filas sin resultado y con fecha ya jugada
+    # Filas sin resultado y con fecha ya jugada (incluye HOY: los partidos del
+    # día pueden haber terminado; get_line_scores devuelve vacío si aún no se juegan)
     if "home_win" not in pred_df.columns:
         pred_df["home_win"] = pd.NA
     if "game_date" not in pred_df.columns:
@@ -1156,7 +1157,7 @@ def _fetch_and_reconcile_results() -> int:
         return 0
     mask = (
         (pred_df["home_win"].isna() | (pred_df["home_win"].astype(str).str.strip().isin(["", "nan"])))
-        & (pred_df["game_date"].str[:10] < today_str)
+        & (pred_df["game_date"].str[:10] <= today_str)
     )
     needs_result = pred_df[mask]
     if needs_result.empty:
@@ -1426,10 +1427,10 @@ def get_accuracy():
             if rows:
                 by_model = {
                     r["model_version"]: {
-                        "total":        r["resolved_predictions"] or 0,
-                        "correct":      None,  # la vista no guarda correct en bruto
+                        "total":        r["total_with_result"] or 0,
+                        "correct":      r["correct"] or 0,
                         "accuracy_pct": float(r["accuracy_pct"]) if r["accuracy_pct"] else None,
-                        "avg_prob_error": float(r["avg_prob_error"]) if r["avg_prob_error"] else None,
+                        "avg_prob_error": None,  # la vista del repo no expone avg_prob_error
                     }
                     for r in rows
                 }
@@ -1538,9 +1539,9 @@ def get_backtest(bankroll: float = Query(default=500_000), period: str = Query(d
             eng = create_engine(DATABASE_URL, pool_pre_ping=True)
             with eng.connect() as conn:
                 rows = conn.execute(
-                    text("SELECT game_id, actual_result FROM v_backtest_history WHERE actual_result IS NOT NULL")
+                    text("SELECT game_id, home_win FROM v_backtest_history WHERE home_win IS NOT NULL")
                 ).mappings().all()
-            db_results = {r["game_id"]: int(r["actual_result"]) for r in rows}
+            db_results = {r["game_id"]: int(r["home_win"]) for r in rows}
             if db_results:
                 logger.debug("backtest: %d resultados cargados desde Neon", len(db_results))
     except Exception as exc:
