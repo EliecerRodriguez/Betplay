@@ -1242,6 +1242,49 @@ function renderBacktest(d) {
     summary + chart + models +
     `<div class="bt-daily-wrap"><div class="bt-sec-hdr">Historial diario (más reciente primero)</div>${dailyHtml}</div>`;
   updateMonthChips(d.available_months || []);
+  loadModelRegistry();
+}
+
+// ── Comparación de versiones del modelo ─────────────────────────────────────
+async function loadModelRegistry() {
+  const body = document.getElementById('resultsBody');
+  if (!body) return;
+  try {
+    const r = await fetch('/api/model_registry');
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    if (!data.models || !data.models.length) return;
+
+    const rows = [...data.models].sort((a, b) => {
+      const na = parseInt(a.version.replace('v','')) || 0;
+      const nb = parseInt(b.version.replace('v','')) || 0;
+      return nb - na;
+    }).map(m => {
+      const acc = m.accuracy !== null && m.accuracy !== undefined ? (m.accuracy * 100).toFixed(1) + '%' : '—';
+      const cv  = m.cv_mean !== null && m.cv_mean !== undefined ? (m.cv_mean * 100).toFixed(1) + '%' : '—';
+      const best = m.promoted ? ' <span style="color:var(--green);font-size:10px">★ activo</span>' : '';
+      return `<tr>
+        <td><span class="mv-chip">${m.version}</span>${best}</td>
+        <td>${m.model_type || '—'}</td>
+        <td>${acc}</td>
+        <td>${cv}</td>
+        <td>${m.n_samples || '—'}</td>
+        <td>${m.n_features || '—'}</td>
+        <td>${m.trained_at || '—'}</td>
+      </tr>`;
+    }).join('');
+
+    body.insertAdjacentHTML('beforeend', `
+      <div class="bt-models-wrap" style="margin-top:22px">
+        <div class="bt-sec-hdr">📦 Comparación de versiones del modelo</div>
+        <table class="bt-table">
+          <thead><tr><th>Versión</th><th>Tipo</th><th>Accuracy</th><th>CV-AUC</th><th>Muestras</th><th>Features</th><th>Entrenado</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`);
+  } catch(e) {
+    // Silencioso — la comparación es complementaria
+  }
 }
 
 async function deleteAtpBet(matchId, predictedPlayer, bookmaker) {

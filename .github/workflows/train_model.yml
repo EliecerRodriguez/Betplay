@@ -86,18 +86,24 @@ jobs:
       # El script train_model.py ya guarda el modelo vN+1. Aquí comparamos
       # métricas: si el nuevo tiene mejor CV-AUC que el actual, se promueve
       # (el auto-detect lo usará). Si no, se elimina para no romper nada.
+      # Además se registra la versión en model_registry (Neon) para comparar.
       - name: Compare and promote model
         env:
           PYTHONPATH: ${{ github.workspace }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           python - <<'EOF'
           import glob, os, joblib
           from sports.nba.model.predictor import _latest_model_version
+          from utils.model_registry import register_model
 
           # Modelo actual (el que se usaba antes de entrenar)
           files = sorted(glob.glob("models/nba_model_v*.joblib"), key=os.path.getmtime)
           if len(files) < 2:
               print("Solo hay un modelo — se promueve sin comparación")
+              new_path = files[0]
+              ver = os.path.basename(new_path).replace("nba_model_", "").replace(".joblib", "")
+              register_model(ver, new_path, promoted=True)
               raise SystemExit(0)
 
           # El nuevo es el de mtime más reciente
@@ -111,14 +117,17 @@ jobs:
           new_acc = new_bundle["metrics"].get("accuracy") or 0
           old_acc = old_bundle["metrics"].get("accuracy") or 0
 
+          new_ver = os.path.basename(new_path).replace("nba_model_", "").replace(".joblib", "")
           print(f"Nuevo modelo: {os.path.basename(new_path)} | CV-AUC={new_cv:.4f} | Acc={new_acc:.4f}")
           print(f"Modelo actual: {os.path.basename(old_path)} | CV-AUC={old_cv:.4f} | Acc={old_acc:.4f}")
 
           # Promover si el nuevo es mejor (CV-AUC o accuracy superior)
           if new_cv >= old_cv or new_acc >= old_acc:
               print("✅ Nuevo modelo es mejor o igual — se promueve")
+              register_model(new_ver, new_path, promoted=True)
           else:
               print("❌ Nuevo modelo es peor — se elimina para no romper producción")
+              register_model(new_ver, new_path, promoted=False)
               os.remove(new_path)
           EOF
 

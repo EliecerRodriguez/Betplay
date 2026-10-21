@@ -1450,6 +1450,21 @@ def get_model_health():
         return {"source": "none", "error": str(exc)}
 
 
+@app.get("/api/model_registry")
+def get_model_registry():
+    """
+    Devuelve el historial de versiones del modelo con sus métricas
+    (accuracy, ROC-AUC, CV, muestras) para comparar versiones.
+    """
+    try:
+        from utils.model_registry import list_models
+        models = list_models()
+        return {"source": "neon", "models": models}
+    except Exception as exc:
+        logger.warning("model_registry: no se pudo listar: %s", exc)
+        return {"source": "none", "error": str(exc), "models": []}
+
+
 @app.get("/api/accuracy")
 def get_accuracy():
     """
