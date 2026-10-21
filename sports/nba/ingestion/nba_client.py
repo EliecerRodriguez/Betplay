@@ -208,6 +208,8 @@ def get_team_stats(season: Optional[str] = None) -> pd.DataFrame:
 
     logger.info("Obteniendo estadísticas de equipo para la temporada: %s", season)
 
+    cache_path = os.path.join("data", "stats_cache", f"team_stats_{season}.csv")
+
     def _fetch() -> "pd.DataFrame":
         stats = LeagueDashTeamStats(
             season=season,
@@ -224,8 +226,19 @@ def get_team_stats(season: Optional[str] = None) -> pd.DataFrame:
     try:
         df = _retry(_fetch)
         if df.empty:
-            logger.error("No se pudieron obtener estadísticas de equipo (timeout persistente)")
+            # Fallback a caché local (útil en CI donde stats.nba.com bloquea IPs de nube)
+            if os.path.exists(cache_path):
+                logger.warning("API stats falló — usando caché local %s", cache_path)
+                return pd.read_csv(cache_path)
+            logger.error("No se pudieron obtener estadísticas de equipo (timeout persistente, sin caché)")
             return df
+        # Guardar caché para CI (stats.nba.com bloquea IPs de nube)
+        try:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            df.to_csv(cache_path, index=False)
+            logger.info("Stats cacheadas en %s", cache_path)
+        except Exception as exc:
+            logger.debug("No se pudo cachear stats: %s", exc)
         logger.info("Estadísticas obtenidas para %d equipos", len(df))
         return df
 
@@ -263,6 +276,8 @@ def get_team_advanced_stats(season: Optional[str] = None) -> pd.DataFrame:
 
     logger.info("Obteniendo estadísticas avanzadas para la temporada: %s", season)
 
+    cache_path = os.path.join("data", "stats_cache", f"team_stats_advanced_{season}.csv")
+
     def _fetch() -> "pd.DataFrame":
         stats = LeagueDashTeamStats(
             season=season,
@@ -280,7 +295,11 @@ def get_team_advanced_stats(season: Optional[str] = None) -> pd.DataFrame:
     try:
         df = _retry(_fetch)
         if df.empty:
-            logger.warning("No se pudieron obtener estadísticas avanzadas (timeout persistente)")
+            # Fallback a caché local (útil en CI donde stats.nba.com bloquea IPs de nube)
+            if os.path.exists(cache_path):
+                logger.warning("API stats avanzadas falló — usando caché local %s", cache_path)
+                return pd.read_csv(cache_path)
+            logger.warning("No se pudieron obtener estadísticas avanzadas (timeout persistente, sin caché)")
             return df
 
         # Columnas relevantes para el modelo
@@ -289,6 +308,14 @@ def get_team_advanced_stats(season: Optional[str] = None) -> pd.DataFrame:
                      "oreb_pct", "dreb_pct", "tm_tov_pct", "pie"]
         available = [c for c in keep_cols if c in df.columns]
         df = df[available].copy()
+
+        # Guardar caché para CI (stats.nba.com bloquea IPs de nube)
+        try:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            df.to_csv(cache_path, index=False)
+            logger.info("Stats avanzadas cacheadas en %s", cache_path)
+        except Exception as exc:
+            logger.debug("No se pudo cachear stats avanzadas: %s", exc)
 
         logger.info("Estadísticas avanzadas obtenidas para %d equipos (%d métricas)",
                     len(df), len(available) - 1)

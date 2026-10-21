@@ -11,6 +11,9 @@ logs/
 output/
 data/cache/
 *.csv
+# Excepción: caché de stats de equipo (necesaria en CI donde stats.nba.com bloquea IPs de nube)
+!data/stats_cache/
+!data/stats_cache/*.csv
 *.pkl
 # Excluir .joblib globalmente EXCEPTO los modelos entrenados en models/
 *.joblib
