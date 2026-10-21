@@ -1,35 +1,23 @@
-name: NBA – Reentrenamiento Automático
+name: NBA – Verificar y Registrar Modelo
 
 on:
-  # Semanal: lunes 05:00 UTC (00:00 Colombia) — antes del pipeline diario
+  # Semanal: lunes 05:00 UTC (00:00 Colombia) — verifica que el modelo del repo es válido
   schedule:
     - cron: "0 5 * * 1"
 
   # Manual desde Actions
   workflow_dispatch:
-    inputs:
-      optimize:
-        description: "Trials Optuna (0 = sin optimización, 50 = recomendado)"
-        required: false
-        default: "50"
-      start_date:
-        description: "Fecha inicio entrenamiento (YYYY-MM-DD). Vacío = 2021-10-19"
-        required: false
-        default: "2021-10-19"
 
 jobs:
-  retrain:
-    name: Reentrenar modelo NBA
+  verify:
+    name: Verificar y registrar modelo
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 15
 
     steps:
       # ── 1. Checkout ─────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4.2.2
-        with:
-          # Necesario para hacer commit del modelo entrenado
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       # ── 2. Python ───────────────────────────────────────────────────────────
       - name: Set up Python 3.11
@@ -42,113 +30,50 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # ── 4. Crear directorios ────────────────────────────────────────────────
-      - name: Create directories
-        run: mkdir -p models logs data/cache
-
-      # ── 5. Determinar siguiente versión ─────────────────────────────────────
-      - name: Get next model version
-        id: version
-        run: |
-          NEXT=$(python utils/next_model_version.py)
-          echo "next_version=$NEXT" >> $GITHUB_OUTPUT
-          echo "Siguiente versión: $NEXT"
-
-      # ── 6. Entrenar modelo ──────────────────────────────────────────────────
-      - name: Train model
+      # ── 4. Verificar modelo y registrar en Neon ─────────────────────────────
+      # El entrenamiento REAL se hace localmente (python utils/train_and_publish.py)
+      # porque CI no tiene el caché de partidos históricos (data/cache/*.parquet)
+      # y stats.nba.com bloquea IPs de nube. Este workflow solo:
+      #   1. Verifica que el modelo más reciente del repo es válido (carga OK)
+      #   2. Registra sus métricas en Neon (model_registry) para comparación
+      - name: Verify and register model
         env:
           PYTHONPATH:    ${{ github.workspace }}
-          NBA_SEASON:    "2025-26"
-          NBA_API_TIMEOUT: "120"
-          NBA_DATA_HEADERS: >-
-            {"Host": "stats.nba.com",
-             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-             "Accept": "application/json, text/plain, */*",
-             "Accept-Language": "en-US,en;q=0.9",
-             "Accept-Encoding": "gzip, deflate, br",
-             "x-nba-stats-origin": "stats",
-             "x-nba-stats-token": "true",
-             "Referer": "https://www.nba.com/",
-             "Connection": "keep-alive"}
-        run: |
-          START="${{ github.event.inputs.start_date || '2021-10-19' }}"
-          OPTIMIZE="${{ github.event.inputs.optimize || '50' }}"
-          python train_model.py \
-            --start-date "$START" \
-            --season 2025-26 \
-            --model xgboost \
-            --optimize "$OPTIMIZE" \
-            --with-form \
-            --with-travel \
-            --version "${{ steps.version.outputs.next_version }}"
-
-      # ── 7. Comparar con modelo actual y decidir promoción ──────────────────
-      # El script train_model.py ya guarda el modelo vN+1. Aquí comparamos
-      # métricas: si el nuevo tiene mejor CV-AUC que el actual, se promueve
-      # (el auto-detect lo usará). Si no, se elimina para no romper nada.
-      # Además se registra la versión en model_registry (Neon) para comparar.
-      - name: Compare and promote model
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL:  ${{ secrets.DATABASE_URL }}
+          LOG_LEVEL:     INFO
         run: |
           python - <<'EOF'
           import glob, os, joblib
           from sports.nba.model.predictor import _latest_model_version
           from utils.model_registry import register_model
 
-          # Modelo actual (el que se usaba antes de entrenar)
-          files = sorted(glob.glob("models/nba_model_v*.joblib"), key=os.path.getmtime)
-          if len(files) < 2:
-              print("Solo hay un modelo — se promueve sin comparación")
-              new_path = files[0]
-              ver = os.path.basename(new_path).replace("nba_model_", "").replace(".joblib", "")
-              register_model(ver, new_path, promoted=True)
-              raise SystemExit(0)
+          version = _latest_model_version()
+          path = os.path.join("models", f"nba_model_{version}.joblib")
+          if not os.path.exists(path):
+              print(f"❌ Modelo {version} no encontrado en {path}")
+              raise SystemExit(1)
 
-          # El nuevo es el de mtime más reciente
-          new_path = files[-1]
-          old_path = files[-2]
-          new_bundle = joblib.load(new_path)
-          old_bundle = joblib.load(old_path)
+          bundle = joblib.load(path)
+          metrics = bundle.get("metrics", {})
+          print(f"✅ Modelo {version} válido:")
+          print(f"   Accuracy: {metrics.get('accuracy')}")
+          print(f"   CV-AUC:   {metrics.get('cv_mean')}")
+          print(f"   Muestras: {metrics.get('n_samples')}")
+          print(f"   Features: {metrics.get('n_features')}")
 
-          new_cv = new_bundle["metrics"].get("cv_mean") or 0
-          old_cv = old_bundle["metrics"].get("cv_mean") or 0
-          new_acc = new_bundle["metrics"].get("accuracy") or 0
-          old_acc = old_bundle["metrics"].get("accuracy") or 0
-
-          new_ver = os.path.basename(new_path).replace("nba_model_", "").replace(".joblib", "")
-          print(f"Nuevo modelo: {os.path.basename(new_path)} | CV-AUC={new_cv:.4f} | Acc={new_acc:.4f}")
-          print(f"Modelo actual: {os.path.basename(old_path)} | CV-AUC={old_cv:.4f} | Acc={old_acc:.4f}")
-
-          # Promover si el nuevo es mejor (CV-AUC o accuracy superior)
-          if new_cv >= old_cv or new_acc >= old_acc:
-              print("✅ Nuevo modelo es mejor o igual — se promueve")
-              register_model(new_ver, new_path, promoted=True)
-          else:
-              print("❌ Nuevo modelo es peor — se elimina para no romper producción")
-              register_model(new_ver, new_path, promoted=False)
-              os.remove(new_path)
+          # Registrar en Neon (model_registry) para comparación de versiones
+          try:
+              register_model(version, path, promoted=True)
+              print(f"✅ Modelo {version} registrado en Neon (model_registry)")
+          except Exception as exc:
+              print(f"⚠️ No se pudo registrar en Neon: {exc}")
           EOF
 
-      # ── 8. Commit del modelo entrenado ──────────────────────────────────────
-      - name: Commit trained model
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add models/*.joblib models/current_elos.json
-          if git diff --cached --quiet; then
-            echo "Sin cambios en modelos — nada que commitear"
-          else
-            git commit -m "feat(model): reentrenamiento automático ${{ steps.version.outputs.next_version }}"
-            git push origin main
-          fi
-
-      # ── 9. Subir logs ───────────────────────────────────────────────────────
+      # ── 5. Subir logs ───────────────────────────────────────────────────────
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: train-logs-${{ github.run_id }}
+          name: verify-logs-${{ github.run_id }}
           path: logs/
           retention-days: 14
