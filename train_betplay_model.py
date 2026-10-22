@@ -38,7 +38,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--market", choices=["yellow", "corners", "both"], default="both",
                         help="Mercado a entrenar (default: both)")
     parser.add_argument("--start-date", default=None, help="YYYY-MM-DD inicio (default: 2025-01-01)")
-    parser.add_argument("--force-download", action="store_true", help="Ignorar caché de partidos")
+    parser.add_argument("--force-download", action="store_true", help="Ignorar caché y dataset consolidado")
+    parser.add_argument("--from-csv", default="data/betplay_cache/dataset_completo.csv",
+                        help="Usar dataset consolidado CSV (ruta rápida, default)")
     return parser.parse_args()
 
 
@@ -46,21 +48,40 @@ def main() -> int:
     args = parse_args()
 
     # ── 1. Dataset histórico ────────────────────────────────────────────────
-    start = date.fromisoformat(args.start_date) if args.start_date else date(2025, 1, 1)
-    end = date.today()
-    logger.info("Construyendo dataset histórico Liga BetPlay (%s → %s)…", start, end)
+    # Ruta rápida: usar el CSV consolidado si existe (evita re-descarga ESPN)
+    matches = pd.DataFrame()
+    csv_path = args.from_csv
+    if not args.force_download and os.path.exists(csv_path):
+        try:
+            matches = pd.read_csv(csv_path)
+            logger.info("Dataset desde CSV consolidado: %s (%d partidos)", csv_path, len(matches))
+        except Exception as exc:
+            logger.warning("No se pudo leer CSV (%s) — reconstruyendo desde ESPN", exc)
+            matches = pd.DataFrame()
 
-    if args.force_download:
-        import shutil
-        from sports.betplay.config.settings import BETPLAY_CACHE_DIR
-        if os.path.exists(BETPLAY_CACHE_DIR):
-            shutil.rmtree(BETPLAY_CACHE_DIR)
-            logger.info("Caché eliminada (--force-download)")
-
-    matches = build_historical_dataset(start_date=start, end_date=end)
     if matches.empty:
-        logger.error("Dataset vacío — no se puede entrenar")
-        return 1
+        start = date.fromisoformat(args.start_date) if args.start_date else date(2025, 1, 1)
+        end = date.today()
+        logger.info("Construyendo dataset histórico Liga BetPlay (%s → %s)…", start, end)
+
+        if args.force_download:
+            import shutil
+            from sports.betplay.config.settings import BETPLAY_CACHE_DIR
+            if os.path.exists(BETPLAY_CACHE_DIR):
+                shutil.rmtree(BETPLAY_CACHE_DIR)
+                logger.info("Caché eliminada (--force-download)")
+
+        matches = build_historical_dataset(start_date=start, end_date=end)
+        if matches.empty:
+            logger.error("Dataset vacío — no se puede entrenar")
+            return 1
+        # Actualizar el CSV consolidado
+        try:
+            matches.to_csv(csv_path, index=False)
+            logger.info("CSV consolidado actualizado: %s", csv_path)
+        except Exception as exc:
+            logger.warning("No se pudo guardar CSV: %s", exc)
+
     logger.info("Dataset: %d partidos", len(matches))
 
     # ── 2. Features ──────────────────────────────────────────────────────────

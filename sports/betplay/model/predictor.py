@@ -106,9 +106,10 @@ def train_model(
     from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
     from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 
-    version = version or f"v{int(_latest_model_version('_'.join([model_type]))[1:]) + 1}"
-    version = version or "v1"
-    # Limpieza del version
+    if version is None:
+        cur = _latest_model_version(model_type)
+        cur_num = int(cur[1:]) if cur.startswith("v") and cur[1:].isdigit() else 1
+        version = f"v{cur_num + 1}"
     if not version.startswith("v"):
         version = f"v{version}"
 

@@ -139,9 +139,15 @@ def build_features(
     df = df.merge(avgs, left_on="home_team_id", right_on="team_id", how="left", suffixes=("", "_home"))
     df = df.merge(avgs, left_on="away_team_id", right_on="team_id", how="left", suffixes=("", "_away"))
 
-    # Forma reciente
-    df["home_form_score"] = df["home_form"].apply(parse_form)
-    df["away_form_score"] = df["away_form"].apply(parse_form)
+    # Forma reciente — priorizar home_form_recent (de lastFiveGames de ESPN)
+    if "home_form_recent" in df.columns and df["home_form_recent"].notna().any():
+        df["home_form_raw"] = df["home_form_recent"]
+        df["away_form_raw"] = df["away_form_recent"]
+    else:
+        df["home_form_raw"] = df["home_form"]
+        df["away_form_raw"] = df["away_form"]
+    df["home_form_score"] = df["home_form_raw"].apply(parse_form)
+    df["away_form_score"] = df["away_form_raw"].apply(parse_form)
     df["form_diff"] = df["home_form_score"] - df["away_form_score"]
 
     # Record (win%)
@@ -157,23 +163,24 @@ def build_features(
     # Ventaja local
     df["home_advantage"] = 1.0
 
+    def _col_or_zero(name: str) -> "pd.Series":
+        """Devuelve la columna o una Serie de ceros si no existe."""
+        if name in df.columns:
+            return pd.to_numeric(df[name], errors="coerce").fillna(0)
+        return pd.Series(0.0, index=df.index)
+
     # Diferenciales de promedios (las señales más fuertes)
     for col in ["yellow", "corners", "fouls", "possession", "shots", "shots_ot"]:
-        h_col = f"team_avg_{col}" if col == "shot_blk" else f"team_avg_{col}_home"
-        if col == "possession":
-            pass
-        df[f"{col}_diff"] = (
-            df.get(f"team_avg_{col}_home", 0).fillna(0)
-            - df.get(f"team_avg_{col}_away", 0).fillna(0)
-        )
+        h = _col_or_zero(f"team_avg_{col}_home")
+        a = _col_or_zero(f"team_avg_{col}_away")
+        df[f"{col}_diff"] = h - a
 
     # Sumas (contexto del partido — ambos equipos)
     for col in ["yellow", "corners", "fouls", "shots"]:
         key = f"team_avg_{col}"
-        df[f"{key}_sum"] = (
-            df.get(f"{key}_home", 0).fillna(0)
-            + df.get(f"{key}_away", 0).fillna(0)
-        )
+        h = _col_or_zero(f"{key}_home")
+        a = _col_or_zero(f"{key}_away")
+        df[f"{key}_sum"] = h + a
 
     # Columnas de tracking
     keep = ["game_id", "game_date", "home_team", "away_team"] + [
