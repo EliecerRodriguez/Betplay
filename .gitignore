@@ -18,5 +18,9 @@ data/cache/
 # Excluir .joblib globalmente EXCEPTO los modelos entrenados en models/
 *.joblib
 !models/*.joblib
+!models/betplay/*.joblib
 .pytest_cache/
 .coverage
+
+# Caché de descarga histórica Liga BetPlay (se regenera con build_historical_dataset)
+data/betplay_cache/
