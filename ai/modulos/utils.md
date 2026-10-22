@@ -133,14 +133,21 @@ print(f"Accuracy: {results['accuracy']:.1%}")
 ### Limpieza de logs
 **¿Existe política de limpieza?**
 
-**Evidencia (utils/logger.py):** NO existe rotación ni limpieza automática.
+**Evidencia (utils/logger.py):** ✅ **SÍ existe rotación automática** (2026-10-21):
 
 ```python
-# logger.py no configura RotatingFileHandler ni TimedRotatingFileHandler
-# Solo crea archivos diarios: logs/{name}_YYYY-MM-DD.log
+# utils/logger.py líneas 44-50
+file_handler = RotatingFileHandler(
+    filename=os.path.join(LOG_DIR, "betplay.log"),
+    maxBytes=5 * 1024 * 1024,  # 5 MB
+    backupCount=3,
+    encoding="utf-8",
+)
 ```
 
-**Consecuencia:** Archivos de logs se acumulan indefinidamente en `logs/`. No hay job de limpieza en GitHub Actions ni script de mantenimiento.
+**Política:** Log único `logs/betplay.log` con rotación a 5 MB y 3 backups (máx. ~20 MB en disco). El archivo se rota automáticamente sin intervención.
+
+**Pendiente:** No hay job de limpieza en GitHub Actions para logs de CI (los artifacts `logs/` se suben con retención de 14 días en los workflows).
 
 ### Frecuencia de backtest
 **¿Backtest es automático o manual?**
@@ -165,3 +172,4 @@ except Exception as exc:
 | Fecha | Cambio |
 |-------|--------|
 | 2026-10-02 | Documentación inicial |
+| 2026-10-21 | Pendiente "Limpieza de logs" resuelto: `logger.py` usa `RotatingFileHandler` (5 MB × 3 backups). |

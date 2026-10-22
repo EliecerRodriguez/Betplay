@@ -9,7 +9,7 @@ Generar predicciones diarias de tenis ATP obteniendo cuotas en tiempo real desde
 - Scrapear cuotas Kambi del día
 - Para cada partido: predecir con modelo ATP + Elo
 - Detectar value bets
-- Guardar en CSV (no usa Supabase actualmente)
+- Guardar en CSV (no usa base de datos; ATP no persiste en Neon)
 
 ## Flujo funcional
 
@@ -63,7 +63,7 @@ soup = BeautifulSoup(response.text, 'html.parser')
 # Cambios en estructura rompen pipeline
 ```
 
-### Sin Supabase
+### Sin base de datos (Neon)
 Pipeline ATP solo usa CSV (no integrado con base de datos).
 
 ### Deduplicación por casa
@@ -90,7 +90,7 @@ Evita predecir mismo partido N veces (una por bookmaker).
 
 ### Críticos
 - **🔴 Scraper Kambi frágil** — cambios en HTML rompen pipeline completo
-- **🔴 Sin Supabase** — no hay base de datos para ATP (solo CSV)
+- **🔴 Sin base de datos** — ATP no persiste en Neon (solo CSV); decisión de diseño previa, no modificada en la migración
 - **🔴 Sin reconciliación ATP** — no se actualizan resultados reales
 
 ### Medios
@@ -105,10 +105,10 @@ Evita predecir mismo partido N veces (una por bookmaker).
 
 ## Pendientes de documentación
 
-### ATP sin Supabase
-**¿Por qué ATP no usa Supabase?**
+### ATP sin base de datos
+**¿Por qué ATP no usa Neon?**
 
-**Respuesta documentada en:** [database.md](database.md) — sección "ATP sin Supabase"
+**Respuesta documentada en:** [database.md](database.md) — sección "ATP sin base de datos"
 
 **Resumen:** ATP usa solo CSV por diseño legacy, menor volumen y fuentes diferentes (Kambi scraper + Sackmann). No hay integración con `DatabaseRepository`.
 
@@ -146,3 +146,4 @@ Evita predecir mismo partido N veces (una por bookmaker).
 | Fecha | Cambio |
 |-------|--------|
 | 2026-10-02 | Documentación inicial |
+| 2026-10-20 | Referencias Supabase → Neon (ATP sigue sin persistir en BD; solo CSV). |

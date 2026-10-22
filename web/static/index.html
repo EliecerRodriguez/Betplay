@@ -301,7 +301,7 @@
     </div>
     <div class="header-spacer"></div>
     <input type="date" id="datePicker" class="date-picker">
-    <div class="bankroll-wrap">
+    <div class="bankroll-wrap" title="Bankroll semanal — se reinicia cada lunes">
       <label for="bankrollInput">Bankroll $</label>
       <input type="number" id="bankrollInput" class="bankroll-input" placeholder="500000" min="1000" step="10000">
     </div>
@@ -1167,10 +1167,14 @@ function renderBacktest(d) {
   const sign    = n => n >= 0 ? '+' : '';
   const pendTxt = d.pending_count > 0 ? `<span style="color:var(--accent);font-size:12px;font-weight:600;">⏳ ${d.pending_count} pendiente${d.pending_count!==1?'s':''}</span>` : '';
 
+  // Format semana (lunes a domingo) para el reinicio
+  const ws = d.week_start ? new Date(d.week_start + 'T12:00:00').toLocaleDateString('es-CO', {day:'numeric', month:'short'}) : '';
+  const we = d.week_end ? new Date(d.week_end + 'T12:00:00').toLocaleDateString('es-CO', {day:'numeric', month:'short'}) : '';
+
   const summary = `
     <div class="bt-summary">
-      <div class="bt-card bc-blue"><div class="bc-label">Bankroll Actual</div><div class="bc-val">${fmt(d.current_bankroll)}</div></div>
-      <div class="bt-card ${profCls}"><div class="bc-label">Ganancia / Pérdida</div><div class="bc-val">${sign(prof)}${fmt(prof)}</div></div>
+      <div class="bt-card bc-blue"><div class="bc-label">Bankroll Semanal${d.weekly_profit>=0?' 📈':' 📉'}</div><div class="bc-val">${fmt(d.weekly_bankroll ?? d.current_bankroll)}</div><div class="s-sub">Semana ${ws} – ${we} · reinicia lunes</div></div>
+      <div class="bt-card ${profCls}"><div class="bc-label">P&L de la semana</div><div class="bc-val">${sign(d.weekly_profit ?? 0)}${fmt(d.weekly_profit ?? 0)}</div><div class="s-sub">${d.weekly_bets ?? 0} apuestas (${d.weekly_wins ?? 0}W)</div></div>
       <div class="bt-card ${d.roi >= 0 ? 'bc-green' : 'bc-red'}"><div class="bc-label">ROI</div><div class="bc-val">${sign(d.roi)}${d.roi}%</div></div>
       <div class="bt-card bc-orange"><div class="bc-label">% Aciertos</div><div class="bc-val">${d.win_rate}%</div></div>
       <div class="bt-card"><div class="bc-label">Apuestas (G/P) ${pendTxt}</div><div class="bc-val" style="color:var(--text);font-size:18px">${d.total_wins}W&nbsp;/&nbsp;${d.total_losses}L</div></div>

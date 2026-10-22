@@ -22,6 +22,29 @@ Proveer modelos de Machine Learning entrenados para predecir resultados de parti
 | v10 | Stacking (XGB+RF+LR) | 68.5% | 0.806 | ~3800 | 52 | +standings, sin injury_impact_diff |
 | v11 | XGBoost + Optuna | 70.8% | 0.752 | 4086 | 53 | CV-AUC 0.704±0.041, Brier 0.201, best trial #21 |
 
+### Sistema de Mejora Continua (MLOps) — 2026-10-21
+
+El pipeline estático se convirtió en un **ciclo de mejora continua**:
+
+1. **Auto-detección de versión** — `sports/nba/model/predictor.py:_latest_model_version()` elige el joblib **más reciente por fecha de modificación** (no por número mayor, que fallaba con v9 > v10). Ya no hay que cambiar `MODEL_VERSION` a mano (eliminado de `.env` y workflows).
+2. **Reentrenamiento con un comando** — `python utils/train_and_publish.py`:
+   - Determina la siguiente versión (vN+1) con `utils/next_model_version.py`
+   - Entrena localmente con todo el historial (caché local + API)
+   - Compara con el modelo actual (CV-AUC / accuracy)
+   - Si es mejor: registra en Neon (`model_registry`) y hace commit+push
+   - Si es peor: **NO lo publica** (producción intacta) y avisa
+   - Opciones: `--dry-run`, `--optimize N`, `--start-date`, `--force`
+3. **Aprender de errores** — el reentrenamiento usa los resultados reales (`home_win`) como target.
+4. **Detección de drift** — `utils/model_monitor.py` compara accuracy acumulado vs reciente (30 días); alerta en el dashboard si cae >10 puntos. Persiste en Neon (`model_health`).
+5. **Comparación de versiones** — `utils/model_registry.py` registra métricas de cada versión en Neon (`model_registry`); tabla comparativa en el dashboard.
+
+**Flujo de reentrenamiento:** CI (entrenador) → **Local (entrenador) + CI (verificador/registrador)**. El workflow `train_model.yml` ya NO entrena en CI (no tiene caché de partidos y stats.nba.com bloquea IPs de nube); solo verifica que el modelo del repo es válido y lo registra en Neon.
+
+**Riesgos MLOps:**
+- 🟡 Caché de stats (`data/stats_cache/*.csv`) puede quedar desactualizada (snapshot de hoy; se actualiza en cada corrida local o cuando la API responde)
+- 🟡 El monitor de drift usa datos limitados (35 predicciones resueltas actualmente) — el drift puede ser ruidoso
+- 🟢 `train_and_publish.py` requiere ejecución manual semanal (no es 100% automático; alternativa futura: cron local o runner self-hosted)
+
 ### Script de entrenamiento
 
 **Archivo:** `train_model.py`
@@ -144,9 +167,13 @@ Descarga partidos desde Jeff Sackmann GitHub y calcula Elos acumulados.
 
 ### NBA
 - `train_model.py` — script de entrenamiento
-- `sports/nba/model/predictor.py` — carga modelo y predice
+- `sports/nba/model/predictor.py` — carga modelo y predice (auto-detección de versión por mtime)
 - `sports/nba/model/monte_carlo.py` — simulaciones
 - `models/nba_model_vN.joblib` — modelos versionados
+- `utils/train_and_publish.py` — comando único de reentrenamiento + publicación (MLOps)
+- `utils/next_model_version.py` — auto-incrementa versión (vN+1)
+- `utils/model_monitor.py` — monitor de salud (drift + calibración) → `model_health`
+- `utils/model_registry.py` — registro de métricas por versión → `model_registry`
 
 ### ATP
 - `build_atp_model.py` — script de entrenamiento v2
@@ -202,7 +229,7 @@ Mapea probabilidades raw → probabilidades calibradas (mejor alineadas con frec
 
 ### Críticos
 - **🔴 Injury impact NO en training** — se aplica post-modelo, modelo no aprende patrones de lesiones
-- **🔴 Sin reentrenamiento automático** — modelos pueden degradar con nuevas temporadas
+- **🟡 Reentrenamiento semanal manual** — `train_and_publish.py` requiere que el usuario lo ejecute (2026-10-21); el flujo automático de CI solo verifica/registra
 - **🔴 Feature importance no documentada** — no hay análisis de qué features aportan más
 
 ### Medios
@@ -221,18 +248,17 @@ Mapea probabilidades raw → probabilidades calibradas (mejor alineadas con frec
 ### Criterio de reentrenamiento
 **¿Cuándo reentrenar?**
 
-**Evidencia (train_model.py):** NO existe criterio automático. El reentrenamiento es completamente manual.
+**Evidencia (2026-10-21):** Se implementó el **Sistema de Mejora Continua (MLOps)**. El reentrenamiento ahora es:
 
-```python
-# train_model.py no tiene scheduler ni validación de degradación
-# Solo se ejecuta cuando el usuario lo invoca explícitamente:
-python train_model.py --version v12 --start-date 2023-10-24 --season 2024-25
+```bash
+python utils/train_and_publish.py   # comando único semanal
 ```
 
-**No existe:**
-- Monitoreo de accuracy en producción
-- Alertas cuando accuracy < umbral
-- Scheduler de reentrenamiento periódico
+**Qué resuelve:**
+- ✅ Monitoreo de accuracy en producción — `utils/model_monitor.py` (drift + calibración, persiste en `model_health`)
+- ✅ Alerta cuando accuracy reciente cae >10 puntos vs acumulado — visible en el dashboard
+- ✅ Comparación de versiones — `model_registry` en Neon con métricas por versión
+- ⚠️ Scheduler de reentrenamiento periódico — sigue siendo manual (el usuario ejecuta el comando semanalmente); alternativa futura: cron local o runner self-hosted
 
 ### Feature importance v11
 **¿Cuál es el ranking de features?**
@@ -260,3 +286,4 @@ python train_model.py --version v12 --start-date 2023-10-24 --season 2024-25
 | Fecha | Cambio |
 |-------|--------|
 | 2026-10-02 | Documentación inicial |
+| 2026-10-21 | Documentado Sistema de Mejora Continua (MLOps): auto-detección de versión, `train_and_publish.py`, monitor de drift (`model_monitor.py`), registro de versiones (`model_registry.py`). Flujo de reentrenamiento: local (entrenador) + CI (verificador/registrador). |

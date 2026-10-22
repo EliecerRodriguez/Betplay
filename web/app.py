@@ -52,6 +52,35 @@ _SNAPSHOTS_DIR = os.path.join(_BASE_DIR, "output", "snapshots")
 _TEAMS_MAP: dict[int, str] = {t["id"]: t["full_name"] for t in nba_teams_static.get_teams()}
 
 
+# ── Bankroll semanal ────────────────────────────────────────────────────────
+# El bankroll se reinicia cada lunes con INITIAL_BANKROLL y acumula el
+# P&L de las apuestas de la semana actual.
+
+def _week_start(d: Optional[_date_cls] = None) -> _date_cls:
+    """Devuelve el lunes de la semana de la fecha dada (default: hoy)."""
+    d = d or _date_cls.today()
+    return d - timedelta(days=d.weekday())
+
+
+def _get_initial_bankroll() -> float:
+    """Devuelve el bankroll inicial configurado (0 = usar el del frontend)."""
+    try:
+        from config.settings import INITIAL_BANKROLL
+        return float(INITIAL_BANKROLL)
+    except Exception:
+        return 500_000.0
+
+
+def _get_weekly_bankroll(bankroll_param: float) -> float:
+    """
+    Devuelve el bankroll efectivo para la semana actual.
+    Si INITIAL_BANKROLL está configurado (> 0), se usa ese como base semanal.
+    Si no (0), se usa el bankroll_param del frontend.
+    """
+    initial = _get_initial_bankroll()
+    return initial if initial > 0 else bankroll_param
+
+
 def _run_today_pipeline_if_missed() -> None:
     """
     Ejecuta el pipeline de hoy si el cron de las 6 AM no pudo correr
@@ -1391,6 +1420,9 @@ def get_analysis(date: Optional[str] = Query(default=None),
     date_str  = date or today_str
     is_past   = date_str < today_str
 
+    # Bankroll efectivo: semanal (reinicia cada lunes)
+    effective_bankroll = _get_weekly_bankroll(bankroll)
+
     # Fechas pasadas: si hay snapshot en disco, devolverlo directamente.
     # Esto preserva la predicción original con los datos del momento exacto
     # en que se generó (lesiones, forma reciente, ELO vigentes ese día).
@@ -1404,7 +1436,7 @@ def get_analysis(date: Optional[str] = Query(default=None),
     if cached and (time.time() - cached["ts"]) < _CACHE_TTL:
         # Aunque esté cacheado, intentar loguear (puede ser nuevo bankroll)
         try:
-            _log_bets_to_journal(cached["data"], bankroll)
+            _log_bets_to_journal(cached["data"], effective_bankroll)
         except Exception:
             pass
         return cached["data"]
@@ -1415,7 +1447,7 @@ def get_analysis(date: Optional[str] = Query(default=None),
         # devuelvan siempre la predicción generada con los datos de hoy.
         _save_snapshot(date_str, data)
         try:
-            _log_bets_to_journal(data, bankroll)
+            _log_bets_to_journal(data, effective_bankroll)
         except Exception as log_exc:
             logger.warning("No se pudo loguear al journal: %s", log_exc)
     except Exception as exc:
@@ -1848,10 +1880,34 @@ def get_backtest(bankroll: float = Query(default=500_000), period: str = Query(d
     total_wagered = sum(r["bet_amount"] for r in resolved)
     pending_count = len([r for r in records if r["status"] == "pending"])
 
+    # ── Bankroll semanal (se reinicia cada lunes) ────────────────────────────
+    # current_bankroll = INITIAL_BANKROLL + P&L de las apuestas de la SEMANA ACTUAL
+    week_start = _week_start()
+    week_end   = week_start + timedelta(days=6)
+    week_str   = week_start.isoformat()
+
+    weekly_resolved = [
+        r for r in resolved
+        if week_str <= r["game_date"] <= week_end.isoformat()
+    ]
+    weekly_pl      = sum(r["pl"] for r in weekly_resolved)
+    weekly_wagered = sum(r["bet_amount"] for r in weekly_resolved)
+    weekly_bets    = len(weekly_resolved)
+    weekly_wins    = sum(1 for r in weekly_resolved if r["correct"])
+
+    weekly_bankroll = round(_get_initial_bankroll() + weekly_pl)
+
     return {
         "initial_bankroll": bankroll,
-        "current_bankroll": round(bankroll + total_pl),
+        "current_bankroll": weekly_bankroll,       # bankroll semanal (reinicia lunes)
         "total_profit":     round(total_pl),
+        "week_start":       week_start.isoformat(),
+        "week_end":         week_end.isoformat(),
+        "weekly_bankroll":  weekly_bankroll,       # bankroll con reinicio semanal
+        "weekly_profit":    round(weekly_pl),
+        "weekly_bets":      weekly_bets,
+        "weekly_wins":      weekly_wins,
+        "weekly_losses":    weekly_bets - weekly_wins,
         "total_bets":       total_bets,
         "total_wins":       total_wins,
         "total_losses":     total_bets - total_wins,

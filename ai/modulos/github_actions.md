@@ -8,7 +8,7 @@ Automatizar la ejecución diaria de pipelines NBA, ATP y reconciliación sin int
 
 - Ejecutar pipelines en horarios específicos (cron)
 - Proveer ambiente Python con dependencias
-- Conectar a Supabase con secretos
+- Conectar a Neon con secretos
 - Permitir ejecución manual (workflow_dispatch)
 
 ## Workflows configurados
@@ -91,20 +91,27 @@ jobs:
 **Script:** `reconcile.py` (procesa backlog)  
 **Propósito:** Reconcilia predicciones pendientes de días pasados
 
+### 5. Train/Verify Model — `train_model.yml`
+**Horario:** Semanal (lunes 05:00 UTC / 00:00 COT) + manual  
+**Script:** verificación inline + `utils/model_registry.py`  
+**Propósito (2026-10-21):** **Ya NO entrena en CI** (CI no tiene caché de partidos históricos `data/cache/*.parquet` y stats.nba.com bloquea IPs de nube). Ahora **verifica** que el modelo más reciente del repo es válido (carga OK) y lo **registra** en Neon (`model_registry`).
+
+### 6. Monitor de salud — paso en `reconcile.yml`
+**Cuándo:** Tras reconciliar (diario 08:00 UTC)  
+**Script:** `utils/model_monitor.py`  
+**Propósito (2026-10-21):** Calcula accuracy acumulado, accuracy reciente (30d), drift y calibración por bucket; persiste en Neon (`model_health`) para el dashboard.
+
 ## Secretos configurados
 
-**Ubicación:** `github.com/[usuario]/Betplay/settings/secrets/actions`
-
+**Ubicación:** \github.com/[usuario]/Betplay/settings/secrets/actions
 | Secret | Uso |
 |--------|-----|
-| `DATABASE_URL` | Conexión Supabase (puerto 6543) |
-| `ODDS_API_KEY` | The Odds API (opcional) |
+| \DATABASE_URL\ | Conexión Neon (puerto 5432, \?sslmode=require\) |
+| \ODDS_API_KEY\ | The Odds API (opcional) |
 
-**Formato DATABASE_URL:**
-```
-postgresql://user:password@host:6543/database
-```
-
+**Formato DATABASE_URL (Neon):**
+\postgresql://user:password@host.neon.tech:5432/database?sslmode=require
+\
 ## Ejecución manual
 
 **URL workflows:**
@@ -121,6 +128,7 @@ postgresql://user:password@host:6543/database
 - `.github/workflows/daily_pipeline.yml`
 - `.github/workflows/atp_pipeline.yml`
 - `.github/workflows/catchup.yml`
+- `.github/workflows/train_model.yml`
 
 ## Flujo operacional
 
@@ -130,7 +138,7 @@ postgresql://user:password@host:6543/database
    
 07:00 COT → NBA Pipeline
    ↓ Genera predicciones de hoy
-   ↓ Guarda en Supabase
+   ↓ Guarda en Neon
    
 18:00 COT → ATP Pipeline
    ↓ Scrapea cuotas Kambi
@@ -158,7 +166,8 @@ postgresql://user:password@host:6543/database
 
 ### Críticos
 - **🔴 Sin notificación de fallos** — workflow falla silenciosamente
-- **🔴 Sin retry** — fallo de API externa aborta workflow completo
+- **🔴 stats.nba.com bloquea IPs de GitHub Actions** — mitigado con caché de stats (`data/stats_cache/`) y moviendo el entrenamiento a local (2026-10-21)
+- **🔴 CI no tiene caché de partidos históricos** — `data/cache/*.parquet` (~GBs, ignorado por git); el workflow de CI ya no entrena, solo verifica/registra
 
 ### Medios
 - **🟡 Task Scheduler local obsoleto** — aún configurado pero no usado
@@ -213,3 +222,5 @@ postgresql://user:password@host:6543/database
 | Fecha | Cambio |
 |-------|--------|
 | 2026-10-02 | Documentación inicial |
+| 2026-10-20 | Secreto `DATABASE_URL` ahora apunta a Neon (formato `?sslmode=require`). Documentado fix de `requirements.txt` (fastapi/uvicorn/xgboost) que hacía fallar `reconcile.yml` todos los días (runs #4-69; run #71 OK). |
+| 2026-10-21 | `train_model.yml` reescrito (verificador/registrador, no entrenador). `MODEL_VERSION` eliminado de workflows (auto-detección). Paso de monitor de salud (`model_monitor.py`) añadido a `reconcile.yml`. |

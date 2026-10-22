@@ -82,7 +82,7 @@ def detect_value_bets(
 - `is_value_bet` — siempre True (ya filtrado)
 
 ### Persistencia
-- **NBA:** Supabase (`value_bets` table) + CSV (`bet_journal.csv`)
+- **NBA:** Neon (`value_bets` table) + CSV (`bet_journal.csv`)
 - **ATP:** CSV (`atp_value_bets.csv`)
 
 ## Threshold configurado

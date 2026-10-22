@@ -13,7 +13,7 @@ Sistema de predicción deportiva automatizado con arquitectura orientada a pipel
 | ML Boosting | XGBoost | Clasificador principal |
 | Optimización | Optuna | TPE Sampler (Bayesian optimization) |
 | Feature Engineering | pandas, numpy | Procesamiento de datos |
-| Base de datos | PostgreSQL (Supabase) | Puerto 6543 (Transaction Pooler) |
+| Base de datos | PostgreSQL (Neon) | Puerto 5432 (sslmode=require) |
 | ORM | SQLAlchemy | Modelos declarativos |
 | API NBA | nba_api | Sin autenticación requerida |
 | API Cuotas | The Odds API | Opcional (ODDS_API_KEY) |
@@ -99,7 +99,7 @@ Sistema de predicción deportiva automatizado con arquitectura orientada a pipel
 │      LineScore                                               │
 │  • repository.py (upsert operations)                         │
 │                                                               │
-│  Tablas Supabase:                                            │
+│  Tablas Neon:                                                │
 │  ┌──────────┬──────────────┬────────────┬───────────────┐   │
 │  │ teams    │ games        │ team_stats │ line_scores   │   │
 │  ├──────────┼──────────────┼────────────┼───────────────┤   │
@@ -252,7 +252,7 @@ betplay/
 Cada deporte sigue el patrón ETL:
 - **Extract:** Ingestion (APIs, scrapers)
 - **Transform:** Processing (features, Elo, form)
-- **Load:** Repository (upserts a Supabase)
+- **Load:** Repository (upserts a Neon)
 
 ### 2. Repository Pattern
 `database/repository.py` abstrae las operaciones CRUD, permitiendo upserts idempotentes.
@@ -299,7 +299,7 @@ Features calculados con rolling windows para evitar look-ahead bias durante entr
     ↓ [odds_client.py]
 14. detect_value_bets(predictions, odds)
     ↓ [value_detector.py] — (prob * odds) - 1 > 0
-15. upsert to Supabase
+15. upsert to Neon
     ↓ [repository.py]
 16. append to CSV (output/)
 ```
@@ -335,7 +335,7 @@ Features calculados con rolling windows para evitar look-ahead bias durante entr
 ### Externas (pueden fallar)
 - **nba_api** — sin rate limiting robusto, puede devolver 429
 - **Kambi HTML** — scraper frágil, cambios en estructura rompen ATP pipeline
-- **Supabase** — timeout en Transaction Pooler (puerto 6543) bajo carga
+- **Neon** — conexión directa puerto 5432 con `sslmode=require`
 
 ### Internas
 - **models/** — si falta modelo, pipeline falla sin fallback
@@ -357,7 +357,7 @@ Features calculados con rolling windows para evitar look-ahead bias durante entr
 2. **Sin alertas** — no notifica si accuracy cae bajo umbral
 3. **Scraper Kambi frágil** — ATP pipeline depende de estructura HTML
 4. **Injury impact post-modelo** — no aprende de lesiones durante training
-5. **CSV como respaldo** — puede divergir de Supabase (source of truth ambigua)
+5. **CSV como respaldo** — puede divergir de Neon (source of truth ambigua)
 6. **Sin validación de features** — puede guardar predicciones con NaN
 
 ## Próximas mejoras recomendadas
@@ -367,8 +367,8 @@ Features calculados con rolling windows para evitar look-ahead bias durante entr
 3. **Monitoring dashboard** — alertar si accuracy < 60% en rolling 30 días
 4. **ATP API alternativa** — reducir dependencia de scraper Kambi
 5. **Injury features en training** — incorporar `injury_impact_diff` durante fit()
-6. **Eliminar CSV** — usar Supabase como única source of truth
+6. **Eliminar CSV** — usar Neon como única source of truth
 
 ## Última actualización
 
-2026-10-02 — Arquitectura documentada desde cero para proyecto Betplay Analytics.
+2026-10-21 — Migración Supabase → Neon (2026-10-20) y Sistema de Mejora Continua MLOps (2026-10-21) incorporados: flujo de entrenamiento local + CI verificador, monitoreo de drift, registro de versiones.

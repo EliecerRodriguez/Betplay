@@ -13,7 +13,7 @@ Orquestar la generación diaria de predicciones NBA mediante la integración de 
 - Ajustar probabilidades por impacto de lesiones
 - Simular resultados con Monte Carlo
 - Detectar value bets vs. cuotas
-- Persistir en Supabase y CSV
+- Persistir en Neon y CSV
 
 ## Flujo funcional
 
@@ -32,7 +32,7 @@ Orquestar la generación diaria de predicciones NBA mediante la integración de 
 12. enrich_predictions_with_mc(preds)        → simulación Monte Carlo
 13. get_odds(date)                           → cuotas de casas
 14. detect_value_bets(preds, odds)           → value > 0
-15. upsert_to_supabase()                     → persistencia
+15. upsert_to_database()                     → persistencia (Neon)
 16. append_to_csv()                          → respaldo local
 ```
 
@@ -62,7 +62,7 @@ Orquestar la generación diaria de predicciones NBA mediante la integración de 
 
 ## Salida
 
-### Supabase
+### Neon
 - `predictions` — predicciones con probabilidades
 - `odds` — cuotas por casa
 - `value_bets` — oportunidades detectadas
@@ -75,10 +75,10 @@ Orquestar la generación diaria de predicciones NBA mediante la integración de 
 
 Variables de entorno (`.env`):
 ```
-NBA_SEASON=2024-25
-MODEL_VERSION=v11
+NBA_SEASON=2025-26
+# MODEL_VERSION=v11  # comentado: auto-detección por fecha (MLOps, 2026-10-21)
 ODDS_API_KEY=...
-DATABASE_URL=postgresql://...
+DATABASE_URL=postgresql://...?sslmode=require  # Neon
 ```
 
 ## Modelo utilizado
@@ -87,6 +87,7 @@ DATABASE_URL=postgresql://...
 - **Tipo:** XGBoost + Optuna (v11: 70.8% accuracy)
 - **Features:** 53 (ver `processing/features.py`)
 - **Calibración:** Isotónica post-entrenamiento
+- **Auto-detección (2026-10-21):** `MODEL_VERSION` ya no se fija manualmente. `_latest_model_version()` elige el joblib más reciente por fecha de modificación (no por número mayor, que fallaba con v9 > v10).
 
 ## Características críticas
 
@@ -129,12 +130,12 @@ Simula 10K partidos por predicción.
 ## Riesgos encontrados
 
 ### Críticos
-- **🔴 Sin retry logic** — fallo en nba_api aborta pipeline completo
+- **🟡 Retry parcial** — `_retry()` con backoff en stats (2026-10-21); `get_daily_games` y `get_line_scores` aún sin retry
 - **🔴 Injury impact post-modelo** — modelo no aprende de lesiones durante training
 - **🔴 Sin validación de features** — puede guardar predicciones con NaN
 
 ### Medios
-- **🟡 CSV como respaldo ambiguo** — puede divergir de Supabase
+- **🟡 CSV como respaldo ambiguo** — puede divergir de Neon
 - **🟡 Rate limiting nba_api** — delay hardcodeado a 0.6s, puede devolver 429
 
 ## Relaciones con otros módulos
@@ -185,3 +186,5 @@ if games_df.empty:
 | Fecha | Cambio |
 |-------|--------|
 | 2026-10-02 | Documentación inicial |
+| 2026-10-20 | `save_to_supabase()` renombrada a `save_to_database()`; persistencia ahora en Neon. |
+| 2026-10-21 | `MODEL_VERSION` ya no se fija (auto-detección por fecha). Retry con backoff y caché de stats en ingesta. |

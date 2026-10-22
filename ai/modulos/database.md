@@ -2,23 +2,27 @@
 
 ## Objetivo
 
-Proveer capa de persistencia con esquema SQL (SQLAlchemy ORM) y operaciones CRUD idempotentes para almacenar predicciones, cuotas, partidos y resultados en Supabase (PostgreSQL).
+Proveer capa de persistencia con esquema SQL (SQLAlchemy ORM) y operaciones CRUD idempotentes para almacenar predicciones, cuotas, partidos y resultados en Neon (PostgreSQL serverless).
 
 ## Responsabilidad
 
 - Definir esquema de tablas (ORM)
 - Operaciones upsert (INSERT ... ON CONFLICT DO UPDATE)
-- Conexión a Supabase vía Transaction Pooler (puerto 6543)
+- Conexión a Neon vía `DATABASE_URL` (puerto 5432, `sslmode=require`)
 - Evitar duplicados con constraints únicos
+
+> **Migración Supabase → Neon (2026-10-20):** La instancia gratuita de Supabase se eliminó sin previo aviso. El backend de persistencia ahora es **Neon PostgreSQL serverless** (puerto 5432, `sslmode=require`). La arquitectura por capas, los modelos ORM, los upserts y las vistas no cambiaron (SQL estándar). Se omitió `channel_binding=require` por compatibilidad con `psycopg2-binary`.
 
 ## Archivos involucrados
 
 - `database/models.py` (205 líneas) — esquema SQLAlchemy
 - `database/repository.py` — operaciones CRUD
+- `database/neon_setup.sql` — script de setup para Neon (esquema + índices + vistas)
+- `database/supabase_setup.sql` — **obsoleto** (referencia histórica, contiene sección pg_cron inaplicable; recomendado eliminar en limpieza futura)
 - `sports/nba/database/models.py` — modelos específicos NBA
 - `sports/nba/database/repository.py` — repo NBA
 
-## Esquema de tablas (Supabase)
+## Esquema de tablas (Neon)
 
 ### `teams`
 Catálogo de equipos NBA.
@@ -172,14 +176,14 @@ session.execute(stmt)
 
 Permite correr pipeline 2x el mismo día sin duplicados.
 
-## Conexión a Supabase
+## Conexión a Neon
 
 **Configuración (`.env`):**
 ```
-DATABASE_URL=postgresql://user:pass@host:6543/db
+DATABASE_URL=postgresql://user:password@host.neon.tech:5432/db?sslmode=require
 ```
 
-**Puerto 6543:** Transaction Pooler (no 5432 directo)
+**Puerto 5432:** conexión directa Neon (no Transaction Pooler). `sslmode=require` es obligatorio en Neon.
 
 **Engine:**
 ```python
@@ -187,6 +191,48 @@ from sqlalchemy import create_engine
 
 engine = create_engine(DATABASE_URL)
 ```
+
+## Tablas de monitoreo MLOps (creadas por utils/)
+
+### `model_health`
+Persistida por `utils/model_monitor.py` (se ejecuta tras reconciliar en CI). Guarda el snapshot diario de salud del modelo.
+
+| Campo | Tipo | Descripción |
+|-------|------|-------------|
+| id | SERIAL PK | |
+| generated_at | DATE | Fecha del snapshot |
+| model_version | VARCHAR(20) | Versión del modelo |
+| total / correct | INTEGER | Predicciones resueltas acumuladas |
+| accuracy_pct | FLOAT | Accuracy acumulado |
+| recent_total / recent_correct | INTEGER | Predicciones resueltas últimos 30 días |
+| recent_accuracy_pct | FLOAT | Accuracy reciente (30d) |
+| drift_pct | FLOAT | Diferencia reciente vs acumulado |
+| drift_detected | BOOLEAN | True si drift > 10 puntos |
+| buckets | JSONB | Calibración por bucket de confianza (50-60%, 60-70%, 70%+) |
+| created_at | TIMESTAMPTZ | |
+
+### `model_registry`
+Persistida por `utils/model_registry.py` y `utils/train_and_publish.py`. Registro de métricas por versión para comparación.
+
+| Campo | Tipo | Descripción |
+|-------|------|-------------|
+| id | SERIAL PK | |
+| version | VARCHAR(20) UNIQUE NOT NULL | vN |
+| model_type | VARCHAR(30) | xgboost, stacking... |
+| accuracy / roc_auc / log_loss / brier | FLOAT | Métricas |
+| cv_mean / cv_std | FLOAT | CV-AUC ± desviación |
+| n_samples / n_features | INTEGER | |
+| trained_at | DATE | |
+| promoted | BOOLEAN | True si es la versión en producción |
+| created_at | TIMESTAMPTZ | |
+
+## Vistas (definidas en `_SETUP_SQL` del repositorio)
+
+> **Nota crítica (2026-10-20):** Las vistas en Neon son las del `_SETUP_SQL` del repositorio (se recrean en cada arranque con `CREATE OR REPLACE VIEW`), **no** las de `database/neon_setup.sql`. Cualquier consulta a vistas debe usar las columnas del repo:
+> - `v_backtest_history`: `game_id, game_date, home_team_id, visitor_team_id, predicted_winner, home_win_prob, away_win_prob, home_win, model_version, result`
+> - `v_model_accuracy`: `model_version, total_games, total_with_result, accuracy_pct, correct`
+>
+> Se recomienda **unificar** `database/neon_setup.sql` con el `_SETUP_SQL` del repositorio para evitar divergencias futuras (o eliminar el SQL duplicado).
 
 ## Creación automática de tablas
 
@@ -213,7 +259,7 @@ Se ejecuta en primer arranque del pipeline.
 ## Dependencias
 
 ### Externas
-- **Supabase (PostgreSQL)** — timeout en Transaction Pooler bajo carga
+- **Neon (PostgreSQL serverless)** — conexión directa puerto 5432, sslmode=require
 
 ### Internas
 - **SQLAlchemy** — ORM
@@ -227,8 +273,10 @@ Se ejecuta en primer arranque del pipeline.
 - **🔴 Sin índices explícitos** — queries por `game_date` pueden ser lentos
 
 ### Medios
-- **🟡 Transaction Pooler timeout** — conexiones largas pueden cerrarse
+- **🟡 channel_binding=require omitido** — se descartó por compatibilidad con psycopg2-binary; si Neon lo requiere en el futuro, habrá que habilitarlo
 - **🟡 Sin retry en conexión** — fallo de red aborta pipeline
+- **🟡 .env no versionado** — la URL de Neon vive solo en .env local y en el secreto de GitHub (mitigado por .env.example poblado)
+- **🟡 supabase_setup.sql obsoleto** — sigue en el repo con sección pg_cron inaplicable; recomendado eliminar en limpieza futura
 
 ## Relaciones con otros módulos
 
@@ -238,8 +286,8 @@ Se ejecuta en primer arranque del pipeline.
 
 ## Pendientes de documentación
 
-### ATP sin Supabase
-**¿Por qué ATP no usa Supabase?**
+### ATP sin base de datos
+**¿Por qué ATP no usa Neon?**
 
 **Evidencia (run_atp_pipeline.py, web/app.py):** ATP usa solo CSV por diseño:
 
@@ -252,7 +300,7 @@ Se ejecuta en primer arranque del pipeline.
 ```
 
 **Razones identificadas:**
-1. **Legacy:** Pipeline ATP fue desarrollado antes de la integración con Supabase
+1. **Legacy:** Pipeline ATP fue desarrollado antes de la integración con la base de datos
 2. **Menor volumen:** ATP tiene menos partidos diarios que NBA
 3. **Fuentes diferentes:** ATP usa scraper Kambi + Jeff Sackmann, no APIs con IDs normalizados
 
@@ -269,27 +317,28 @@ Se ejecuta en primer arranque del pipeline.
 
 **Riesgo:** Tablas pueden crecer indefinidamente afectando rendimiento.
 
-### Índices en Supabase
+### Índices en Neon
 **¿Existen índices?**
 
-**Evidencia (database/models.py):** Los índices están definidos **solo en ORM** como `UniqueConstraint`:
+**Evidencia (database/neon_setup.sql):** ✅ **SÍ existen índices explícitos** (2026-10-21):
 
-```python
-# Líneas 55-57, 79-81, etc.
-__table_args__ = (
-    UniqueConstraint("game_id", name="uq_game_id"),
-)
+```sql
+-- database/neon_setup.sql líneas 32-35
+CREATE INDEX IF NOT EXISTS idx_line_scores_game_date ON line_scores(game_date);
+CREATE INDEX IF NOT EXISTS idx_predictions_game_date ON predictions(game_date);
+CREATE INDEX IF NOT EXISTS idx_predictions_home_win  ON predictions(home_win)
+    WHERE home_win IS NULL;
 ```
 
-**No existen:**
-- Índices en `game_date` para queries por fecha
-- Índices en `home_team_id`, `visitor_team_id` para joins
-- `CREATE INDEX` explícito en migraciones
+**Además:** Los `UniqueConstraint` del ORM (`database/models.py`) generan índices únicos automáticos en Neon.
 
-**Dependencia:** Supabase puede crear índices automáticos para FK, pero no están documentados.
+**Pendiente:** No hay índices explícitos en `home_team_id`/`visitor_team_id` para joins (Neon crea índices automáticos para FK, pero no están documentados).
 
 ## Historial de actualizaciones
 
 | Fecha | Cambio |
 |-------|--------|
 | 2026-10-02 | Documentación inicial |
+| 2026-10-20 | Migración Supabase → Neon (puerto 5432, sslmode=require). Documentadas tablas model_health y model_registry. Documentado bug corregido de la vista v_backtest_history (columnas home_team_id/visitor_team_id). Documentado neon_setup.sql y supabase_setup.sql obsoleto. |
+| 2026-10-21 | Documentadas columnas reales de las vistas del repo (v_backtest_history, v_model_accuracy) y recomendación de unificar neon_setup.sql con _SETUP_SQL. |
+| 2026-10-21 | Pendiente "Índices en Neon" resuelto: `neon_setup.sql` define índices explícitos en `game_date` y `home_win`. |

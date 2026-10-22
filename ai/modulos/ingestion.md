@@ -29,6 +29,13 @@ Obtener datos crudos desde APIs externas y scrapers web para alimentar los pipel
 
 **Rate limiting:** `time.sleep(NBA_API_DELAY)` entre llamadas (0.6s)
 
+**Retry con backoff (2026-10-21):** `_retry()` en `get_team_stats` y `get_team_advanced_stats` — reintenta con backoff cuando la API falla (stats.nba.com bloquea IPs de nube en CI).
+
+**Caché de stats (2026-10-21):** `data/stats_cache/` como fallback cuando la API falla:
+- `data/stats_cache/team_stats_2025-26.csv` — stats básicas (30 equipos)
+- `data/stats_cache/team_stats_advanced_2025-26.csv` — stats avanzadas (30 equipos)
+- Excepción en `.gitignore` para `data/stats_cache/*.csv` (necesarios en CI)
+
 #### `odds_client.py`
 **APIs utilizadas:** The Odds API
 
@@ -166,9 +173,9 @@ ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
 ## Riesgos encontrados
 
 ### Críticos
-- **🔴 Sin retry logic** — fallo de API aborta pipeline
 - **🔴 Scraper Kambi frágil** — cambios en HTML rompen ATP
-- **🔴 nba_api puede devolver 429** — rate limiting sin manejo robusto
+- **🔴 stats.nba.com bloquea IPs de nube** — mitigado (2026-10-21) con retry con backoff (`_retry()`) y caché local en `data/stats_cache/`
+- **🔴 nba_api puede devolver 429** — rate limiting sin manejo robusto (parcialmente mitigado con retry)
 
 ### Medios
 - **🟡 Elos ATP manuales** — requiere `build_elos.py` periódicamente
@@ -185,14 +192,9 @@ ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
 ### Política de reintentos
 **¿Existe retry logic?**
 
-**Evidencia (sports/nba/ingestion/*.py):** NO existe política de reintentos implementada.
+**Evidencia (2026-10-21):** ✅ **Resuelto parcialmente.** `sports/nba/ingestion/nba_client.py` ahora tiene `_retry()` con backoff en `get_team_stats` y `get_team_advanced_stats` (verificado: simulación de 3 fallos → éxito en el 3er intento). Además hay caché local en `data/stats_cache/` como fallback cuando la API falla.
 
-```python
-# nba_client.py: solo time.sleep() entre llamadas
-time.sleep(NBA_API_DELAY)  # 0.6s delay, pero no retry on error
-```
-
-**Consecuencia:** Cualquier error de red o timeout aborta el pipeline completo.
+**Pendiente:** El retry no cubre `get_daily_games` ni `get_line_scores`.
 
 ### Monitoreo de APIs
 **¿Se detectan APIs caídas?**
@@ -225,3 +227,4 @@ time.sleep(NBA_API_DELAY)  # 0.6s delay, pero no retry on error
 | Fecha | Cambio |
 |-------|--------|
 | 2026-10-02 | Documentación inicial |
+| 2026-10-21 | Documentado retry con backoff (`_retry()`) y caché de stats (`data/stats_cache/`) en `nba_client.py` como mitigación al bloqueo de stats.nba.com a IPs de nube. |

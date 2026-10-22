@@ -2,12 +2,12 @@
 
 ## Resumen del proyecto
 
-Sistema automatizado de predicción deportiva multi-deporte (NBA + ATP Tenis) con detección de value bets usando Machine Learning. Opera 24/7 mediante GitHub Actions, generando predicciones diarias antes de cada partido y almacenándolas en Supabase (PostgreSQL).
+Sistema automatizado de predicción deportiva multi-deporte (NBA + ATP Tenis) con detección de value bets usando Machine Learning. Opera 24/7 mediante GitHub Actions, generando predicciones diarias antes de cada partido y almacenándolas en Neon (PostgreSQL serverless).
 
 - **Nombre:** Betplay Analytics
 - **Deportes:** NBA (baloncesto) y ATP (tenis masculino)
 - **Tecnología:** Python 3.x + Machine Learning (XGBoost, Stacking, Optuna)
-- **Base de datos:** Supabase (PostgreSQL) — puerto 6543 (Transaction Pooler)
+- **Base de datos:** Neon (PostgreSQL serverless) — puerto 5432 (sslmode=require)
 - **Automatización:** GitHub Actions — 3 workflows diarios
 - **Dashboard:** FastAPI + Uvicorn (puerto 8000)
 
@@ -22,7 +22,7 @@ Identificar oportunidades de valor en apuestas deportivas comparando probabilida
 | Lenguaje | Python 3.x |
 | ML Framework | scikit-learn, XGBoost |
 | Optimización | Optuna (TPE Bayesian) |
-| Base de datos | PostgreSQL (Supabase) |
+| Base de datos | PostgreSQL (Neon) |
 | ORM | SQLAlchemy |
 | API NBA | nba_api (sin clave) |
 | API Cuotas | The Odds API (opcional) + Kambi scraper |
@@ -70,7 +70,7 @@ Identificar oportunidades de valor en apuestas deportivas comparando probabilida
          │                  │                  │
          ▼                  ▼                  ▼
 ┌─────────────────────────────────────────────────────────┐
-│         Database (Supabase PostgreSQL)                  │
+│         Database (Neon PostgreSQL)                      │
 │  games  predictions  odds  value_bets  teams  stats    │
 └─────────────────────────────────────────────────────────┘
          │
@@ -88,7 +88,7 @@ Identificar oportunidades de valor en apuestas deportivas comparando probabilida
 | Módulos documentados | 12 |
 | Archivos Python | ~75 (sin contar .venv) |
 | Cobertura de tests | No detectada |
-| Última actualización | 2026-10-02 |
+| Última actualización | 2026-10-21 |
 
 ## Índice de módulos detectados
 
@@ -111,7 +111,7 @@ Identificar oportunidades de valor en apuestas deportivas comparando probabilida
 
 | Hora COT | Acción | Script | Salida |
 |----------|--------|--------|--------|
-| 06:30 AM | Reconciliación de resultados | `reconcile.py` | Actualiza `predictions.home_win` en Supabase |
+| 06:30 AM | Reconciliación de resultados | `reconcile.py` | Actualiza `predictions.home_win` en Neon |
 | 07:00 AM | Pipeline NBA | `run_pipeline.py` | Genera predicciones NBA del día |
 | 06:00 PM | Pipeline ATP | `run_atp_pipeline.py` | Genera predicciones ATP del día |
 
@@ -144,7 +144,7 @@ Identificar oportunidades de valor en apuestas deportivas comparando probabilida
 ### Medios
 - **Task Scheduler local obsoleto** — reemplazado por GitHub Actions pero aún configurado
 - **Sin monitoreo de accuracy en producción** — reconciliación no alerta sobre caída de performance
-- **CSV como respaldo vs. Supabase como source of truth** — puede causar inconsistencias
+- **CSV como respaldo vs. Neon como source of truth** — puede causar inconsistencias
 
 ## Última actualización
 

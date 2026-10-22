@@ -22,16 +22,14 @@ Centralizar configuración del proyecto mediante variables de entorno y constant
 ## Variables de entorno (`.env`)
 
 ### Base de datos
-```
-DB_HOST=aws-0-us-west-1.pooler.supabase.com
-DB_PORT=6543
-DB_NAME=postgres
-DB_USER=postgres.xxxxx
+\DB_HOST=ep-xxxxx.us-east-1.aws.neon.tech
+DB_PORT=5432
+DB_NAME=neondb
+DB_USER=neondb_owner
 DB_PASSWORD=xxxxx
-DATABASE_URL=postgresql://user:pass@host:6543/db
-```
-
-**Nota:** Puerto 6543 = Transaction Pooler (no 5432 directo)
+DATABASE_URL=postgresql://user:password@host.neon.tech:5432/db?sslmode=require
+\
+**Nota:** Puerto 5432 = conexión directa Neon. \sslmode=require\ es obligatorio. Se omitió \channel_binding=require\ por compatibilidad con \psycopg2-binary\.
 
 ### NBA API
 ```
@@ -51,8 +49,10 @@ ODDS_MARKETS=h2h
 
 ### Modelo
 ```
-MODEL_VERSION=v11
+# MODEL_VERSION=v11  # comentado: auto-detección por fecha de modificación (MLOps)
 ```
+
+**Nota (2026-10-21):** `MODEL_VERSION` ya no se fija manualmente. `sports/nba/model/predictor.py:_latest_model_version()` elige el joblib más reciente por fecha de modificación (no por número mayor, que fallaba con v9 > v10).
 
 ### Logging
 ```
@@ -103,7 +103,7 @@ engine = create_engine(DATABASE_URL)
 
 ### Críticos
 - **🔴 Sin validación de variables** — fallo silencioso si falta variable crítica
-- **🔴 `.env` puede no existir** — no hay `.env.example` completo
+- **🔴 `.env` puede no existir** — mitigado: `.env.example` poblado (2026-10-20) con plantilla Neon
 
 ### Medios
 - **🟡 Defaults hardcodeados** — algunos valores default pueden ser incorrectos
@@ -130,12 +130,14 @@ DATABASE_URL = os.getenv("DATABASE_URL", f"postgresql://...")
 ### Template .env.example
 **¿Existe `.env.example` completo?**
 
-**Evidencia:** El archivo `.env.example` existe pero está **vacío** (0 bytes). No contiene template de variables.
+**Evidencia (2026-10-20):** El archivo `.env.example` fue **poblado** por el PSE con plantilla Neon (host, puerto 5432, URL de ejemplo, resto de config). Antes estaba vacío (0 bytes).
 
-**Recomendación:** Crear template con todas las variables documentadas en este módulo.
+**Estado:** ✅ Resuelto.
 
 ## Historial de actualizaciones
 
 | Fecha | Cambio |
 |-------|--------|
 | 2026-10-02 | Documentación inicial |
+| 2026-10-20 | Actualizado a Neon (host, puerto 5432, URL con sslmode=require). `.env.example` poblado (antes vacío). |
+| 2026-10-21 | `MODEL_VERSION` ya no se fija manualmente (auto-detección por fecha). |

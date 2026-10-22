@@ -8,7 +8,7 @@ Proveer interfaz web para visualizar predicciones, value bets, accuracy acumulad
 
 - API REST con FastAPI
 - Servir dashboard HTML
-- Consultar Supabase
+- Consultar Neon
 - Mostrar predicciones del día
 - Calcular accuracy histórico
 
@@ -86,6 +86,64 @@ Proveer interfaz web para visualizar predicciones, value bets, accuracy acumulad
 }
 ```
 
+**Nota (2026-10-20):** Lee primero desde Neon (vista `v_model_accuracy`); si no está disponible, cae al CSV. El campo `source` de la respuesta es `"neon"` (antes `"supabase"`). Columnas reales de la vista: `model_version, total_games, total_with_result, accuracy_pct, correct`.
+
+### `GET /api/model_health`
+**Descripción (2026-10-21):** Salud del modelo (drift + calibración)
+
+**Fuente:** Neon (tabla `model_health`, generada por `utils/model_monitor.py` tras reconciliar)
+
+**Respuesta:**
+```json
+{
+  "source": "neon",
+  "models": [
+    {
+      "model_version": "v11",
+      "total": 35,
+      "correct": 18,
+      "accuracy_pct": 51.4,
+      "recent_total": 6,
+      "recent_correct": 2,
+      "recent_accuracy_pct": 33.3,
+      "drift_pct": -18.1,
+      "drift_detected": true,
+      "buckets": { "50-60": {...}, "60-70": {...}, "70+": {...} }
+    }
+  ]
+}
+```
+
+**Alerta de drift:** si el accuracy reciente cae >10 puntos vs el acumulado → `drift_detected: true` → tarjeta de salud en el dashboard muestra ⚠️.
+
+### `GET /api/model_registry`
+**Descripción (2026-10-21):** Comparación de versiones del modelo
+
+**Fuente:** Neon (tabla `model_registry`, generada por `utils/model_registry.py`)
+
+**Respuesta:**
+```json
+{
+  "source": "neon",
+  "models": [
+    {
+      "version": "v11",
+      "model_type": "xgboost",
+      "accuracy": 0.708,
+      "roc_auc": 0.752,
+      "cv_mean": 0.704,
+      "cv_std": 0.041,
+      "n_samples": 4086,
+      "n_features": 53,
+      "trained_at": "2026-10-01",
+      "promoted": true
+    }
+  ]
+}
+```
+
+**Frontend:** tabla comparativa en el modal Resultados del dashboard (accuracy, CV-AUC, muestras, features, fecha por versión).
+
 ## Ejecución
 
 ### Desarrollo
@@ -109,7 +167,7 @@ uvicorn web.app:app --host 0.0.0.0 --port 8000
 |------------|---------|
 | Framework | FastAPI |
 | Servidor | Uvicorn |
-| Base datos | SQLAlchemy (Supabase) |
+| Base datos | SQLAlchemy (Neon) |
 | Frontend | HTML + CSS + JavaScript |
 
 ## Dependencias
@@ -123,7 +181,7 @@ uvicorn web.app:app --host 0.0.0.0 --port 8000
 
 ### Críticos
 - **🔴 Sin autenticación** — dashboard público (cualquiera puede ver predicciones)
-- **🔴 Sin caché** — cada request consulta Supabase (lento con muchas predicciones)
+- **🔴 Sin caché** — cada request consulta Neon (lento con muchas predicciones)
 
 ### Medios
 - **🟡 Sin paginación** — `/api/predictions` retorna todo el día (puede ser >50 partidos)
@@ -189,3 +247,5 @@ mc_total = round(float(p["mc_total"].iloc[0]), 1)
 | Fecha | Cambio |
 |-------|--------|
 | 2026-10-02 | Documentación inicial |
+| 2026-10-20 | Referencias Supabase → Neon. Documentados bugs corregidos: `/api/backtest` usaba columna inexistente `actual_result` (ahora `home_win`), `/api/accuracy` usaba columnas inexistentes (ahora las de la vista del repo), reconciliación excluía partidos de HOY (`<` → `<=`). |
+| 2026-10-21 | Documentados endpoints `/api/model_health` y `/api/model_registry`, tarjeta de salud del modelo (drift + calibración) y tabla comparativa de versiones en el modal Resultados. |
