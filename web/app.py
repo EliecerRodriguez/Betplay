@@ -856,18 +856,30 @@ def _fetch_and_reconcile_results() -> int:
         except Exception:
             ls_df = pd.DataFrame()
 
-    existing_ls_dates: set[str] = (
-        set(ls_df["fetch_date"].str[:10].dropna().unique())
-        if not ls_df.empty and "fetch_date" in ls_df.columns else set()
-    )
-
-    # Descargar line_scores para fechas que faltan
+    # Descargar line_scores para fechas que faltan (o que tienen partidos
+    # pendientes SIN line_scores — puede pasar si se consultó mientras el
+    # partido estaba en curso y la fecha quedó marcada como descargada).
     new_ls_frames: list = []
     for date_str in pending_dates:
-        if date_str in existing_ls_dates:
-            continue
+        # Game_ids pendientes de esta fecha
+        date_pending_ids = set(
+            needs_result.loc[needs_result["game_date"].str[:10] == date_str, "game_id"]
+            .astype(str).str.strip()
+        )
+        # Game_ids que ya tienen line_scores
+        if not ls_df.empty and "game_id" in ls_df.columns:
+            existing_ids = set(ls_df["game_id"].astype(str).str.strip())
+        else:
+            existing_ids = set()
+        missing_ids = date_pending_ids - existing_ids
+        if not missing_ids:
+            continue  # todos los pendientes de esta fecha ya tienen line_scores
         try:
-            logger.info("_fetch_and_reconcile_results: descargando line scores para %s…", date_str)
+            logger.info(
+                "_fetch_and_reconcile_results: descargando line scores para %s "
+                "(%d game_ids faltantes)…",
+                date_str, len(missing_ids),
+            )
             day_ls = get_line_scores(date_str)
             if not day_ls.empty:
                 new_ls_frames.append(day_ls)
