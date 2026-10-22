@@ -322,6 +322,7 @@
   <!-- BetPlay (initially hidden) -->
   <div id="betplaySections" style="display:none">
     <div id="betplayStatsRow" class="stats-row"></div>
+    <div id="betplayModelHealthRow" class="stats-row" style="margin-bottom:12px"></div>
     <div class="section-hdr">Partidos Liga BetPlay del día</div>
     <div id="betplayGrid" class="games-grid"></div>
   </div>
@@ -811,6 +812,85 @@ async function loadBetplay(date) {
 function renderBetplay(data) {
   renderBetplayStats(data.summary, data.date);
   renderBetplayMatches(data.matches);
+  loadBetplayModelHealth();
+}
+
+// ── Salud del modelo Liga BetPlay (drift + calibración) ─────────────────────
+async function loadBetplayModelHealth() {
+  const el = document.getElementById('betplayModelHealthRow');
+  if (!el) return;
+  try {
+    const r = await fetch('/api/betplay/model_health');
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+
+    const activeVer = data.active_version || '—';
+
+    let health = null;
+    if (data.source === 'neon' && data.latest && data.latest.length) {
+      health = data.latest.find(h => h.model_version === activeVer) || data.latest[0];
+    } else if (data.source === 'live' && data.health) {
+      const byModel = data.health.by_model;
+      if (byModel && activeVer !== '—' && byModel[activeVer]) {
+        const m = byModel[activeVer];
+        health = {
+          model_version: activeVer,
+          total: m.total,
+          correct: m.correct,
+          accuracy_pct: m.accuracy_pct,
+          recent_accuracy_pct: m.recent_accuracy_pct,
+          drift_pct: m.drift_pct,
+          drift_detected: m.drift_detected,
+          buckets: m.buckets,
+        };
+      }
+    }
+    if (!health) { el.innerHTML = ''; return; }
+
+    const drift = health.drift_pct;
+    const driftDetected = health.drift_detected;
+    const driftCls = driftDetected ? 's-red' : (drift !== null && drift < 0 ? 's-orange' : 's-green');
+    const driftIcon = driftDetected ? '⚠️' : (drift !== null && drift < 0 ? '📉' : '✅');
+    const driftTxt = drift === null || drift === undefined
+      ? '—' : (drift > 0 ? '+' : '') + drift + ' pts';
+
+    let bucketsHtml = '';
+    if (health.buckets) {
+      const b = typeof health.buckets === 'string' ? JSON.parse(health.buckets) : health.buckets;
+      bucketsHtml = Object.entries(b).map(([label, v]) => {
+        const acc = v.accuracy === null || v.accuracy === undefined ? '—' : v.accuracy + '%';
+        const cls = v.accuracy >= 60 ? 's-green' : v.accuracy >= 50 ? 's-orange' : 's-red';
+        return `<div class="stat-card ${cls}" style="min-width:110px">
+          <div class="s-label">Conf. ${label}</div>
+          <div class="s-val" style="font-size:16px">${acc}</div>
+          <div class="s-sub">${v.bets} apuestas</div>
+        </div>`;
+      }).join('');
+    }
+
+    const isActive = health.model_version === activeVer;
+    const activeBadge = isActive ? ' <span style="font-size:9px;background:rgba(0,230,118,.15);color:var(--green);border:1px solid rgba(0,230,118,.3);padding:1px 6px;border-radius:10px;font-weight:700">ACTIVO</span>' : '';
+
+    el.innerHTML = `
+      <div class="stat-card s-blue" style="min-width:150px">
+        <div class="s-label">Modelo BetPlay activo</div>
+        <div class="s-val" style="font-size:16px">${activeVer}${activeBadge}</div>
+        <div class="s-sub">${health.total || 0} apuestas resueltas</div>
+      </div>
+      <div class="stat-card s-purple">
+        <div class="s-label">Accuracy acumulado</div>
+        <div class="s-val">${health.accuracy_pct ?? '—'}%</div>
+        <div class="s-sub">histórico</div>
+      </div>
+      <div class="stat-card ${driftCls}">
+        <div class="s-label">Drift (30d) ${driftIcon}</div>
+        <div class="s-val">${driftTxt}</div>
+        <div class="s-sub">${health.recent_accuracy_pct ?? '—'}% reciente</div>
+      </div>
+      ${bucketsHtml}`;
+  } catch(e) {
+    el.innerHTML = '';
+  }
 }
 
 function renderBetplayStats(s, date) {

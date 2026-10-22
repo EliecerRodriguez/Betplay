@@ -1902,6 +1902,70 @@ def reconcile_betplay_results():
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/api/betplay/model_health")
+def get_betplay_model_health():
+    """
+    Devuelve la salud de los modelos BetPlay: accuracy acumulado, reciente,
+    drift detectado y calibración por bucket de confianza.
+
+    Lee desde Neon (tabla betplay_model_health, generada por
+    utils/betplay_model_monitor.py). Si no hay datos, calcula en vivo.
+    """
+    # Versión activa real (auto-detectada por predictor)
+    try:
+        from sports.betplay.model.predictor import _latest_model_version
+        active_yellow = _latest_model_version("yellow")
+        active_corners = _latest_model_version("corners")
+        active_version = f"yellow:{active_yellow}|corners:{active_corners}"
+    except Exception:
+        active_version = os.environ.get("BETPLAY_MODEL_VERSION", "?")
+    try:
+        from config.settings import DATABASE_URL
+        if DATABASE_URL:
+            from sqlalchemy import create_engine, text
+            eng = create_engine(DATABASE_URL, pool_pre_ping=True)
+            with eng.connect() as conn:
+                rows = conn.execute(text("""
+                    SELECT generated_at, model_version, total, correct, accuracy_pct,
+                           recent_total, recent_correct, recent_accuracy_pct,
+                           drift_pct, drift_detected, buckets
+                    FROM betplay_model_health
+                    ORDER BY generated_at DESC, model_version
+                """)).mappings().all()
+            if rows:
+                return {
+                    "source": "neon",
+                    "active_version": active_version,
+                    "latest": [dict(r) for r in rows],
+                }
+    except Exception as exc:
+        logger.debug("betplay_model_health: Neon no disponible (%s) — calculando en vivo", exc)
+
+    # Fallback: calcular en vivo (no persiste)
+    try:
+        from utils.betplay_model_monitor import compute_health
+        health = compute_health(dry_run=True)
+        return {"source": "live", "active_version": active_version, "health": health}
+    except Exception as exc:
+        logger.warning("betplay_model_health: no se pudo calcular: %s", exc)
+        return {"source": "none", "active_version": active_version, "error": str(exc)}
+
+
+@app.get("/api/betplay/model_registry")
+def get_betplay_model_registry():
+    """
+    Devuelve el historial de versiones de los modelos BetPlay con sus métricas
+    (accuracy, ROC-AUC, CV, muestras) para comparar versiones.
+    """
+    try:
+        from utils.betplay_model_registry import list_models
+        models = list_models()
+        return {"source": "neon", "models": models}
+    except Exception as exc:
+        logger.warning("betplay_model_registry: no se pudo listar: %s", exc)
+        return {"source": "none", "error": str(exc), "models": []}
+
+
 @app.get("/api/betplay/backtest")
 def get_betplay_backtest(bankroll: float = Query(default=500_000), period: str = Query(default="all"),
                          start_date: Optional[str] = Query(default=None), end_date: Optional[str] = Query(default=None)):

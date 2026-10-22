@@ -1,0 +1,90 @@
+name: BetPlay – Pipeline Diario
+
+on:
+  # Se ejecuta a las 09:00 UTC (04:00 hora Colombia), después del reconcile NBA.
+  schedule:
+    - cron: "0 9 * * *"
+
+  # Ejecución manual desde la pestaña "Actions" → "Run workflow"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Fecha a procesar (YYYY-MM-DD). Vacío = hoy."
+        required: false
+        default: ""
+
+jobs:
+  pipeline:
+    name: BetPlay Pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create output and logs directories
+        run: mkdir -p output/snapshots logs data/betplay_cache
+
+      # ── 1. Construir dataset histórico (si no hay CSV consolidado) ──────────
+      # En CI no existe data/betplay_cache/dataset_completo.csv (no está en git),
+      # así que se construye desde ESPN. El pipeline lo usa para promedios.
+      - name: Build historical dataset
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          LOG_LEVEL:  INFO
+        run: |
+          python -c "
+          import os, sys
+          sys.path.insert(0, os.getcwd())
+          from sports.betplay.ingestion.historical_client import build_historical_dataset
+          import pandas as pd
+          csv = 'data/betplay_cache/dataset_completo.csv'
+          if not os.path.exists(csv):
+              df = build_historical_dataset()
+              if not df.empty:
+                  df.to_csv(csv, index=False)
+                  print(f'Dataset construido: {len(df)} partidos')
+              else:
+                  print('Dataset vacío — continuando sin promedios')
+          else:
+              print('CSV consolidado ya existe')
+          "
+
+      # ── 2. Pipeline diario ──────────────────────────────────────────────────
+      - name: Run BetPlay pipeline
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          LOG_LEVEL:  INFO
+          BETPLAY_DATE: ${{ github.event.inputs.date || '' }}
+        run: |
+          if [ -n "$BETPLAY_DATE" ]; then
+            python run_betplay_pipeline.py --date "$BETPLAY_DATE"
+          else
+            python run_betplay_pipeline.py
+          fi
+
+      # ── 3. Monitor de salud del modelo BetPlay ──────────────────────────────
+      - name: Run BetPlay model health monitor
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PYTHONPATH:   ${{ github.workspace }}
+          LOG_LEVEL:    INFO
+        run: python utils/betplay_model_monitor.py
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: betplay-pipeline-logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 14
