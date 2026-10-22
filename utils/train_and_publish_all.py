@@ -53,6 +53,8 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Entrena pero NO publica")
     parser.add_argument("--force", action="store_true", help="Publicar aunque el modelo sea peor")
     parser.add_argument("--optimize", type=int, default=50, help="Trials Optuna NBA (default: 50)")
+    parser.add_argument("--optimize-betplay", type=int, default=0,
+                        help="Trials Optuna BetPlay (default: 0 = fijos; ej. 30)")
     parser.add_argument("--start-date", default=None, help="Fecha inicio NBA (default: 2021-10-19)")
     args = parser.parse_args()
 
@@ -78,6 +80,8 @@ def main() -> int:
             bp_args.append("--dry-run")
         if args.force:
             bp_args.append("--force")
+        if args.optimize_betplay and args.optimize_betplay > 0:
+            bp_args += ["--optimize", str(args.optimize_betplay)]
         if _run_script("utils/train_and_publish_betplay.py", bp_args) != 0:
             failures.append("BetPlay")
 

@@ -41,6 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-download", action="store_true", help="Ignorar caché y dataset consolidado")
     parser.add_argument("--from-csv", default="data/betplay_cache/dataset_completo.csv",
                         help="Usar dataset consolidado CSV (ruta rápida, default)")
+    parser.add_argument("--optimize", type=int, default=0,
+                        help="Trials Optuna de hiperparámetros (default: 0 = fijos)")
     return parser.parse_args()
 
 
@@ -101,7 +103,7 @@ def main() -> int:
         X = train_df[available].astype(float)
         y = train_df["target_yellow"].astype(int)
         if y.nunique() > 1 and len(y) >= 30:
-            m = train_model(X, y, model_type="yellow")
+            m = train_model(X, y, model_type="yellow", optimize_trials=args.optimize)
             results.append(m)
         else:
             logger.warning("Datos insuficientes para tarjetas (%d muestras, %d clases)", len(y), y.nunique())
@@ -110,7 +112,7 @@ def main() -> int:
         X = train_df[available].astype(float)
         y = train_df["target_corners"].astype(int)
         if y.nunique() > 1 and len(y) >= 30:
-            m = train_model(X, y, model_type="corners")
+            m = train_model(X, y, model_type="corners", optimize_trials=args.optimize)
             results.append(m)
         else:
             logger.warning("Datos insuficientes para córners (%d muestras, %d clases)", len(y), y.nunique())

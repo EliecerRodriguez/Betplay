@@ -56,8 +56,11 @@ def _model_path(model_type: str, version: str) -> str:
 
 # ── Entrenamiento (reutiliza el engine genérico de la NBA) ───────────────────
 
-def _build_pipeline_betplay(model_type_clf: str = "xgboost"):
-    """Construye el pipeline clonando el patrón NBA (XGB + calibración isotónica)."""
+def _build_pipeline_betplay(model_type_clf: str = "xgboost", xgb_params: Optional[dict] = None):
+    """Construye el pipeline clonando el patrón NBA (XGB + calibración isotónica).
+
+    xgb_params: hiperparámetros XGB a sobreescribir (de Optuna, opcional).
+    """
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.impute import SimpleImputer
     from sklearn.pipeline import Pipeline
@@ -65,11 +68,13 @@ def _build_pipeline_betplay(model_type_clf: str = "xgboost"):
 
     try:
         from xgboost import XGBClassifier
-        base = XGBClassifier(
+        default_params = dict(
             n_estimators=400, max_depth=5, learning_rate=0.04,
             subsample=0.8, colsample_bytree=0.8, min_child_weight=3,
             eval_metric="logloss", random_state=42, n_jobs=-1,
         )
+        default_params.update(xgb_params or {})  # Optuna override
+        base = XGBClassifier(**default_params)
     except ImportError:
         from sklearn.ensemble import RandomForestClassifier
         base = RandomForestClassifier(
@@ -85,11 +90,75 @@ def _build_pipeline_betplay(model_type_clf: str = "xgboost"):
     ])
 
 
+# ── Optimización Bayesiana (Optuna) — clon del patrón NBA ────────────────────
+
+def tune_xgboost_betplay(X: pd.DataFrame, y: pd.Series, n_trials: int = 50) -> dict:
+    """
+    Optimización bayesiana de hiperparámetros XGBoost con Optuna.
+
+    Usa TimeSeriesSplit(3) para la evaluación interna → no hay data leakage.
+    Mismo espacio de búsqueda que el NBA (los hiperparámetros influyentes).
+
+    Args:
+        X:        Features de entrenamiento (ordenadas temporalmente).
+        y:        Target binario (1=Over, 0=Under).
+        n_trials: Número de configuraciones a probar (default 50).
+
+    Returns:
+        Dict con los mejores hiperparámetros encontrados.
+    """
+    import optuna
+    from xgboost import XGBClassifier
+    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.impute import SimpleImputer
+    from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    def objective(trial: "optuna.Trial") -> float:
+        params = {
+            "n_estimators":     trial.suggest_int("n_estimators",     100, 1000),
+            "max_depth":        trial.suggest_int("max_depth",         3,   8),
+            "learning_rate":    trial.suggest_float("learning_rate",  0.005, 0.15, log=True),
+            "subsample":        trial.suggest_float("subsample",      0.5,  1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "min_child_weight": trial.suggest_int("min_child_weight",  1,  15),
+            "reg_alpha":        trial.suggest_float("reg_alpha",      1e-8, 10.0, log=True),
+            "reg_lambda":       trial.suggest_float("reg_lambda",     1e-8, 10.0, log=True),
+            "gamma":            trial.suggest_float("gamma",          0.0,   5.0),
+        }
+        clf  = XGBClassifier(**params, eval_metric="logloss", random_state=42, n_jobs=-1)
+        cal  = CalibratedClassifierCV(clf, method="isotonic", cv=3)
+        pipe = Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler",  StandardScaler()),
+            ("clf",     cal),
+        ])
+        tscv   = TimeSeriesSplit(n_splits=3)
+        scores = cross_val_score(pipe, X, y, cv=tscv, scoring="roc_auc", n_jobs=-1)
+        return float(scores.mean())
+
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=42, n_startup_trials=10),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=3),
+    )
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+
+    best = study.best_params
+    logger.info(
+        "Optuna BetPlay finalizado: mejor AUC=%.4f en %d trials | params=%s",
+        study.best_value, n_trials, best,
+    )
+    return best
+
+
 def train_model(
     X: pd.DataFrame,
     y: pd.Series,
     model_type: str,  # 'yellow' | 'corners'
     version: Optional[str] = None,
+    optimize_trials: int = 0,
 ) -> dict:
     """
     Entrena el modelo de tarjetas o córners (Over/Under).
@@ -115,7 +184,17 @@ def train_model(
 
     logger.info("Entrenando modelo %s versión %s (%d muestras)", model_type, version, len(X))
 
-    pipeline = _build_pipeline_betplay("xgboost")
+    # Opcional: optimizar hiperparámetros con Optuna (clon del patrón NBA)
+    best_params = {}
+    if optimize_trials > 0 and len(X) >= 60:
+        try:
+            logger.info("Iniciando optimización Optuna con %d trials …", optimize_trials)
+            best_params = tune_xgboost_betplay(X, y, n_trials=optimize_trials)
+        except Exception as exc:
+            logger.warning("Optuna falló (%s) — usando parámetros por defecto", exc)
+            best_params = {}
+
+    pipeline = _build_pipeline_betplay("xgboost", xgb_params=best_params)
 
     # Split temporal (sin data leakage) — clon del patrón NBA
     if len(X) >= 40:

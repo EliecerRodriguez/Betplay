@@ -43,7 +43,7 @@ def _current_version(model_type: str) -> str:
     return _latest_model_version(model_type)
 
 
-def _train(version: str, market: str) -> dict:
+def _train(version: str, market: str, optimize: int = 0) -> dict:
     """Ejecuta train_betplay_model.py y devuelve las métricas del modelo entrenado."""
     import joblib
 
@@ -51,6 +51,8 @@ def _train(version: str, market: str) -> dict:
         sys.executable, "train_betplay_model.py",
         "--market", market,
     ]
+    if optimize and optimize > 0:
+        cmd += ["--optimize", str(optimize)]
     logger.info("Ejecutando: %s", " ".join(cmd))
     result = subprocess.run(cmd, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     if result.returncode != 0:
@@ -130,6 +132,8 @@ def main() -> int:
     parser.add_argument("--force", action="store_true", help="Publicar aunque el modelo sea peor")
     parser.add_argument("--market", choices=["yellow", "corners", "both"], default="both",
                         help="Mercado a entrenar (default: both)")
+    parser.add_argument("--optimize", type=int, default=0,
+                        help="Trials Optuna de hiperparámetros (default: 0 = fijos)")
     args = parser.parse_args()
 
     markets = ["yellow", "corners"] if args.market == "both" else [args.market]
@@ -141,7 +145,7 @@ def main() -> int:
 
         # 1. Entrenar
         try:
-            metrics = _train(version, market)
+            metrics = _train(version, market, optimize=args.optimize)
         except Exception as exc:
             logger.error("[%s] Entrenamiento falló: %s", market, exc)
             return 1
