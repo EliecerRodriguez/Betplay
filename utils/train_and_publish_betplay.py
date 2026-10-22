@@ -88,10 +88,14 @@ def _compare_and_decide(new_metrics: dict, current_ver: str, market: str, force:
     if force:
         logger.info("--force: publicando aunque sea peor")
         return True
-    if new_cv >= old_cv or new_acc >= old_acc:
-        logger.info("✅ Nuevo modelo %s es mejor o igual — se publica", market)
+    # Mejora estricta: solo se publica si el nuevo modelo es REALMENTE mejor.
+    # Un empate (>=) o mejora infinitesimal no se publica para evitar versiones
+    # redundantes cada vez que se reentrena sin datos nuevos.
+    improved = new_cv > old_cv or new_acc > old_acc
+    if improved:
+        logger.info("✅ Nuevo modelo %s es mejor — se publica", market)
         return True
-    logger.warning("❌ Nuevo modelo %s es peor — NO se publica (producción intacta)", market)
+    logger.warning("❌ Nuevo modelo %s no mejora al actual — NO se publica (producción intacta)", market)
     return False
 
 
