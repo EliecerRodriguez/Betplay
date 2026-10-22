@@ -119,9 +119,8 @@ async def _startup_preload() -> None:
     loop = asyncio.get_running_loop()
     loop.run_in_executor(None, _get_team_stats_cached)
     loop.run_in_executor(None, _fetch_and_reconcile_results)
-    loop.run_in_executor(None, _fetch_and_reconcile_atp_results)
     loop.run_in_executor(None, _run_today_pipeline_if_missed)
-    logger.info("Startup: pre-carga de team stats, reconciliación NBA+ATP y catch-up pipeline lanzados en background")
+    logger.info("Startup: pre-carga de team stats, reconciliación NBA y catch-up pipeline lanzados en background")
 
 _CACHE: dict[str, dict] = {}   # key: date_str -> {"data": ..., "ts": float}
 _CACHE_TTL = 10 * 60           # 10 minutos — refresca cuotas y predicciones automáticamente
@@ -134,9 +133,9 @@ _TEAM_STATS_TTL = 6 * 3600   # segundos
 _ODDS_CACHE: dict[str, dict] = {}   # key: date_str -> {"df": DataFrame, "ts": float}
 _ODDS_TTL = 30 * 60   # 30 minutos
 
-# Caché ATP — 10 min (misma TTL que pipeline NBA)
-_ATP_CACHE: dict[str, dict] = {}
-_ATP_CACHE_TTL = 10 * 60
+# Caché BetPlay — 10 min (misma TTL que pipeline NBA)
+_BETPLAY_CACHE: dict[str, dict] = {}
+_BETPLAY_CACHE_TTL = 10 * 60
 
 # ── Persistencia (Neon / PostgreSQL) ────────────────────────────────────────
 
@@ -797,403 +796,6 @@ def _log_bets_to_journal(data: dict, bankroll: float) -> None:
             "Exposición total: %.1f%% del bankroll",
             len(new_rows), date_str, max_bets, max_exposure * 100,
         )
-
-
-def _log_atp_bets_to_journal(data: dict, bankroll: float) -> None:
-    """Guarda en output/atp_bet_journal.csv las value bets ATP con datos suficientes
-    para calcular P&L real una vez que se conozcan los resultados."""
-    journal_path = os.path.join(_BASE_DIR, "output", "atp_bet_journal.csv")
-    date_str  = data.get("date", "")
-    model_ver = os.environ.get("ATP_MODEL_VERSION", "atp_v4")
-
-    existing_keys: set[tuple] = set()   # (match_id, predicted_player, bookmaker)
-    rows: list[dict] = []
-    if os.path.exists(journal_path):
-        try:
-            jdf = pd.read_csv(journal_path, dtype=str)
-            rows = jdf.to_dict("records")
-            existing_keys = {
-                (str(r.get("match_id", "")), str(r.get("predicted_player", "")), str(r.get("bookmaker", "")))
-                for r in rows
-            }
-        except Exception:
-            pass
-
-    logged_dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    new_rows: list[dict] = []
-
-    for match in data.get("matches", []):
-        mid = str(match.get("match_id", ""))
-        if not mid:
-            continue
-
-        # Mejor value bet por jugador apostado (máximo kelly_pct entre casas)
-        best_per_player: dict[str, dict] = {}
-        for vb in match.get("value_bets", []):
-            if not vb.get("is_value_bet") or vb.get("kelly_pct", 0) <= 0:
-                continue
-            player = vb["player"]
-            if player not in best_per_player or vb["kelly_pct"] > best_per_player[player]["kelly_pct"]:
-                best_per_player[player] = vb
-
-        for player, vb in best_per_player.items():
-            bm  = vb["bookmaker"]
-            key = (mid, player, bm)
-            if key in existing_keys:
-                continue
-
-            p1       = match.get("player1", "")
-            p2       = match.get("player2", "")
-            opponent = p2 if player == p1 else p1
-
-            bet_amount    = max(1, round(bankroll * vb["kelly_pct"] / 200))
-            potential_gain = round(bet_amount * (vb["market_odds"] - 1))
-
-            new_rows.append({
-                "match_id":         mid,
-                "game_date":        match.get("game_date", date_str),
-                "logged_date":      logged_dt,
-                "player1_name":     p1,
-                "player2_name":     p2,
-                "tourney_name":     match.get("tourney_name", ""),
-                "surface":          match.get("surface", ""),
-                "tourney_level":    match.get("tourney_level", ""),
-                "predicted_player": player,
-                "opponent":         opponent,
-                "bookmaker":        bm,
-                "model_prob_pct":   vb["model_prob_pct"],
-                "market_odds":      vb["market_odds"],
-                "kelly_pct":        vb["kelly_pct"],
-                "bankroll_snapshot": bankroll,
-                "bet_amount":       bet_amount,
-                "potential_gain":   potential_gain,
-                "model_version":    model_ver,
-                "actual_winner":    "",
-                "correct":          "",
-                "pl":               "",
-            })
-            existing_keys.add(key)
-
-    if new_rows:
-        all_rows = rows + new_rows
-        pd.DataFrame(all_rows).to_csv(journal_path, index=False)
-        logger.info("ATP journal: %d nuevas apuestas registradas para %s", len(new_rows), date_str)
-
-
-def _fetch_atp_completed_from_espn(pending_dates: list) -> list[dict]:
-    """
-    Obtiene resultados de partidos ATP Men's Singles completados desde ESPN.
-    No requiere clave API.
-
-    Se consulta ESPN por CADA fecha pendiente para no perder resultados de
-    días anteriores cuando la fecha máxima es hoy (el scoreboard de hoy no
-    incluye partidos completados ayer o antes).
-
-    Returns:
-        Lista de dicts {player1, player2, winner, date}
-    """
-    import requests as _req
-    if not pending_dates:
-        return []
-
-    def _parse_espn_data(data: dict, query_date: str) -> list[dict]:
-        parsed: list[dict] = []
-        for event in data.get("events", []):
-            for grouping in event.get("groupings", []):
-                grp_name = grouping.get("name", "").lower()
-                for comp in grouping.get("competitions", []):
-                    # Solo partidos finalizados o con retiro (ambos tienen ganador declarado)
-                    comp_status = (comp.get("status") or {}).get("type", {}).get("name", "")
-                    if comp_status not in ("STATUS_FINAL", "STATUS_RETIRED"):
-                        continue
-                    # Solo Men's Singles (excluye dobles y femenino)
-                    comp_type = (comp.get("type") or {}).get("text", "").lower()
-                    if "men" not in comp_type and "men" not in grp_name:
-                        continue
-                    if "singles" not in comp_type and "singles" not in grp_name:
-                        continue
-                    if "women" in comp_type or "women" in grp_name:
-                        continue
-
-                    competitors = [c for c in comp.get("competitors", []) if c.get("type") == "athlete"]
-                    if len(competitors) < 2:
-                        continue
-                    winner_name = None
-                    player_names: list[str] = []
-                    for c in competitors:
-                        name = (c.get("athlete") or {}).get("displayName", "")
-                        if not name:
-                            continue
-                        player_names.append(name)
-                        if c.get("winner"):
-                            winner_name = name
-                    if winner_name and len(player_names) == 2:
-                        raw_date = comp.get("date", "") or event.get("date", "")
-                        match_date = raw_date[:10] if raw_date else query_date
-                        parsed.append({
-                            "player1": player_names[0],
-                            "player2": player_names[1],
-                            "winner": winner_name,
-                            "date": match_date,
-                        })
-        return parsed
-
-    results: list[dict] = []
-    seen_keys: set[tuple] = set()   # evitar duplicados si ESPN repite un partido en dos fechas
-
-    for date_str in sorted(set(pending_dates)):
-        query_date = date_str.replace("-", "")
-        try:
-            r = _req.get(
-                "https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard",
-                params={"dates": query_date},
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=20,
-            )
-            r.raise_for_status()
-            data = r.json()
-        except Exception as exc:
-            logger.warning("ATP reconcile: ESPN API falló para %s: %s", date_str, exc)
-            continue
-
-        day_results = _parse_espn_data(data, date_str)
-        for rec in day_results:
-            key = (rec["player1"], rec["player2"], rec["date"])
-            if key not in seen_keys:
-                results.append(rec)
-                seen_keys.add(key)
-        logger.info("ATP reconcile: %d Men's Singles completados desde ESPN para %s", len(day_results), query_date)
-
-    return results
-
-
-def _fetch_and_reconcile_atp_results() -> int:
-    """
-    Cruza las apuestas ATP pendientes con resultados reales.
-
-    Fuentes (en orden de prioridad):
-      1. ESPN scoreboard API    — gratuita, sin clave, resultados en tiempo real.
-      2. The Odds API /scores   — si ODDS_API_KEY está configurada.
-      3. Dataset Sackmann       — fallback histórico (puede tener retraso de semanas).
-
-    Corrección: se incluyen partidos de HOY (<=) porque pueden estar
-    terminados aunque la fecha de juego sea la misma fecha actual.
-
-    Returns:
-        Número de apuestas actualizadas con resultado real.
-    """
-    import time as _time
-    import requests as _requests
-    from sports.atp.ingestion.historical_client import _download_year
-    from sports.atp.config.settings import ATP_CACHE_DIR
-    from config.settings import ODDS_API_KEY, ODDS_API_BASE_URL
-
-    journal_path = os.path.join(_BASE_DIR, "output", "atp_bet_journal.csv")
-    today_str    = _date_cls.today().isoformat()
-    current_year = _date_cls.today().year
-
-    if not os.path.exists(journal_path):
-        return 0
-
-    try:
-        jdf = pd.read_csv(journal_path, dtype=str)
-    except Exception as exc:
-        logger.warning("ATP reconcile: no se pudo leer journal: %s", exc)
-        return 0
-
-    for col in ("actual_winner", "correct", "pl"):
-        if col not in jdf.columns:
-            jdf[col] = ""
-
-    # FIX: <= incluye partidos de hoy que ya terminaron
-    needs_mask = (
-        (jdf["correct"].isna() | jdf["correct"].astype(str).str.strip().isin(["", "nan"]))
-        & (jdf["game_date"].str[:10] <= today_str)
-    )
-    if not needs_mask.any():
-        logger.info("ATP reconcile: todas las apuestas pasadas ya tienen resultado")
-        return 0
-
-    pending_df    = jdf[needs_mask]
-    pending_dates = sorted(set(pending_df["game_date"].str[:10].dropna().unique()))
-
-    def _names_match(n1: str, n2: str) -> bool:
-        a, b = n1.lower().strip(), n2.lower().strip()
-        if not a or not b:
-            return False
-        if a == b:
-            return True
-        sa, sb = a.split()[-1], b.split()[-1]
-        if len(sa) > 3 and sa == sb:
-            return True
-        if a in b or b in a:
-            return True
-        # Maneja formatos cortos tipo "Tsitsipas S." vs "Stefanos Tsitsipas"
-        if len(sa) > 3 and sa in b:
-            return True
-        if len(sb) > 3 and sb in a:
-            return True
-        return False
-
-    def _apply_results(src_records: list[dict], target_df: "pd.DataFrame") -> int:
-        """Aplica resultados de una lista [{player1, player2, winner, date?}] al journal."""
-        count = 0
-        for idx in target_df.index:
-            row       = jdf.loc[idx]
-            predicted = str(row.get("predicted_player", "")).strip()
-            opponent  = str(row.get("opponent",         "")).strip()
-            bet_date  = str(row.get("game_date",         "")).strip()[:10]
-            if not predicted:
-                continue
-            for rec in src_records:
-                p1, p2, winner = rec["player1"], rec["player2"], rec["winner"]
-                # Filtrar por fecha: solo aceptar resultado del mismo día ±2 días
-                rec_date = rec.get("date", "")
-                if rec_date and bet_date:
-                    try:
-                        delta = abs((_date_cls.fromisoformat(rec_date) - _date_cls.fromisoformat(bet_date)).days)
-                        if delta > 2:
-                            continue
-                    except ValueError:
-                        pass  # si el formato falla, no filtrar por fecha
-                if not (_names_match(predicted, p1) or _names_match(predicted, p2)):
-                    continue
-                if not (_names_match(opponent, p1) or _names_match(opponent, p2)):
-                    continue
-                correct    = _names_match(predicted, winner)
-                bet_amount = float(row.get("bet_amount",    0) or 0)
-                pot_gain   = float(row.get("potential_gain", 0) or 0)
-                jdf.at[idx, "actual_winner"] = winner
-                jdf.at[idx, "correct"] = "1" if correct else "0"
-                jdf.at[idx, "pl"] = str(round(pot_gain) if correct else round(-bet_amount))
-                count += 1
-                break
-        return count
-
-    updated = 0
-
-    # ── Fuente 1: ESPN (gratuita, sin clave) ──────────────────────────────────
-    espn_results = _fetch_atp_completed_from_espn(pending_dates)
-    if espn_results:
-        updated += _apply_results(espn_results, pending_df)
-
-    # ── Fuente 2: The Odds API /scores (si hay clave) ─────────────────────────
-    still_pending_mask = (
-        (jdf["correct"].isna() | jdf["correct"].astype(str).str.strip().isin(["", "nan"]))
-        & (jdf["game_date"].str[:10] <= today_str)
-    )
-    still_pending_df = jdf[still_pending_mask]
-
-    if not still_pending_df.empty and ODDS_API_KEY:
-        try:
-            scores_r = _requests.get(
-                f"{ODDS_API_BASE_URL}/sports/tennis_atp/scores",
-                params={"apiKey": ODDS_API_KEY, "daysFrom": 3, "dateFormat": "iso"},
-                timeout=15,
-            )
-            scores_r.raise_for_status()
-            odds_completed = [
-                e for e in scores_r.json()
-                if e.get("completed") and e.get("scores") and len(e["scores"]) >= 2
-            ]
-            logger.info("ATP reconcile: %d eventos desde The Odds API", len(odds_completed))
-            odds_records: list[dict] = []
-            for event in odds_completed:
-                scores = event["scores"]
-                try:
-                    s0, s1 = int(scores[0]["score"]), int(scores[1]["score"])
-                except (ValueError, TypeError):
-                    continue
-                odds_records.append({
-                    "player1": scores[0]["name"],
-                    "player2": scores[1]["name"],
-                    "winner":  scores[0]["name"] if s0 > s1 else scores[1]["name"],
-                    "date":    event.get("commence_time", "")[:10],
-                })
-            if odds_records:
-                updated += _apply_results(odds_records, still_pending_df)
-        except Exception as exc:
-            logger.warning("ATP reconcile: The Odds API scores falló: %s", exc)
-
-    # ── Fuente 3: Sackmann histórico (fallback para fechas más antiguas) ──────
-    still_pending_mask = (
-        (jdf["correct"].isna() | jdf["correct"].astype(str).str.strip().isin(["", "nan"]))
-        & (jdf["game_date"].str[:10] <= today_str)
-    )
-    still_pending_df = jdf[still_pending_mask]
-
-    if not still_pending_df.empty:
-        pending_years = sorted(set(still_pending_df["game_date"].str[:4].dropna().unique()))
-        all_matches: list[pd.DataFrame] = []
-        for year_str in pending_years:
-            try:
-                year = int(year_str)
-            except ValueError:
-                continue
-            cache_file = os.path.join(ATP_CACHE_DIR, f"atp_matches_{year}.csv")
-            force = year == current_year and (
-                not os.path.exists(cache_file)
-                or (_time.time() - os.path.getmtime(cache_file)) > 6 * 3600
-            )
-            try:
-                df = _download_year(year, force=force)
-                if df is not None and not df.empty:
-                    all_matches.append(df)
-            except Exception as exc:
-                logger.warning("ATP reconcile: descarga %d falló: %s", year, exc)
-
-        if all_matches:
-            matches_df = pd.concat(all_matches, ignore_index=True)
-            matches_df["_tourney_dt"] = pd.to_datetime(
-                matches_df["tourney_date"].astype(str).str.strip().str[:8],
-                format="%Y%m%d", errors="coerce",
-            )
-            matches_df = matches_df.dropna(subset=["_tourney_dt", "winner_name", "loser_name"])
-
-            for idx in still_pending_df.index:
-                row       = jdf.loc[idx]
-                predicted = str(row.get("predicted_player", "")).strip()
-                opponent  = str(row.get("opponent",         "")).strip()
-                gdate_str = str(row.get("game_date",        ""))[:10]
-                if not predicted or not gdate_str:
-                    continue
-                try:
-                    game_dt = pd.to_datetime(gdate_str)
-                except Exception:
-                    continue
-                window = matches_df[
-                    (matches_df["_tourney_dt"] >= game_dt - pd.Timedelta(days=14)) &
-                    (matches_df["_tourney_dt"] <= game_dt + pd.Timedelta(days=1))
-                ]
-                if window.empty:
-                    continue
-                for _, m in window.iterrows():
-                    wn, ln = str(m.get("winner_name", "")), str(m.get("loser_name", ""))
-                    pred_wins  = _names_match(predicted, wn) and _names_match(opponent, ln)
-                    pred_loses = _names_match(predicted, ln) and _names_match(opponent, wn)
-                    if pred_wins or pred_loses:
-                        correct    = pred_wins
-                        bet_amount = float(row.get("bet_amount",    0) or 0)
-                        pot_gain   = float(row.get("potential_gain", 0) or 0)
-                        jdf.at[idx, "actual_winner"] = wn
-                        jdf.at[idx, "correct"] = "1" if correct else "0"
-                        jdf.at[idx, "pl"] = str(round(pot_gain) if correct else round(-bet_amount))
-                        updated += 1
-                        break
-                else:
-                    logger.debug("ATP reconcile: sin resultado Sackmann para %s vs %s (%s)",
-                                 predicted, opponent, gdate_str)
-        else:
-            logger.info("ATP reconcile: sin datos Sackmann disponibles para fechas históricas")
-
-    if updated > 0:
-        try:
-            jdf.to_csv(journal_path, index=False)
-            logger.info("ATP reconcile: %d apuestas actualizadas con resultado real", updated)
-        except Exception as exc:
-            logger.warning("ATP reconcile: no se pudo guardar journal: %s", exc)
-
-    return updated
 
 
 # ── Reconciliación predicciones → resultados reales ──────────────────────────
@@ -1921,18 +1523,53 @@ def get_backtest(bankroll: float = Query(default=500_000), period: str = Query(d
         "available_months": available_months,
     }
 
-_ATP_LEVEL_LABELS = {
-    "G": "Grand Slam", "M": "Masters 1000",
-    "F": "ATP Finals", "A": "ATP 500/250",
-    "C": "Challenger", "D": "Copa Davis",
-}
+@app.delete("/api/journal/bet")
+def delete_nba_bet(
+    game_id:        str = Query(...),
+    predicted_side: str = Query(...),
+    bet_type:       str = Query(...),
+):
+    """Elimina una apuesta específica del historial NBA (bet_journal.csv)."""
+    journal_path = os.path.join(_BASE_DIR, "output", "bet_journal.csv")
+    if not os.path.exists(journal_path):
+        raise HTTPException(status_code=404, detail="Historial NBA no encontrado")
+    df = pd.read_csv(journal_path, dtype=str)
+    # Normalizar game_id: quitar ceros iniciales para comparar "0042500311" == "42500311"
+    norm = lambda s: s.astype(str).str.lstrip("0")
+    mask = (
+        (norm(df["game_id"]) == str(game_id).lstrip("0")) &
+        (df["predicted_side"].astype(str) == str(predicted_side)) &
+        (df["bet_type"].astype(str) == str(bet_type))
+    )
+    if not mask.any():
+        raise HTTPException(status_code=404, detail="Apuesta no encontrada")
+    df = df[~mask]
+    df.to_csv(journal_path, index=False)
+    return {"status": "ok", "deleted": int(mask.sum())}
 
 
-def _run_atp(date_str: str) -> dict:
-    """Ejecuta el pipeline ATP y construye la respuesta JSON para el dashboard."""
-    from run_atp_pipeline import run as atp_run
+# ════════════════════════════════════════════════════════════════════════════
+# LIGA BETPLAY (fútbol Colombia) — clon del patrón NBA
+# ════════════════════════════════════════════════════════════════════════════
 
-    result   = atp_run(date_str=date_str, save=True)
+def _norm_team_name(name: str) -> str:
+    """Normaliza nombre de equipo para unir ESPN ↔ Kambi."""
+    if not isinstance(name, str):
+        return ""
+    return (name.lower()
+            .replace("s.a", "").replace("s.a.", "").replace("club deportivo", "")
+            .replace("club", "").replace("deportivo", "").replace("deportes", "")
+            .replace("atl", "atletico").replace("á", "a").replace("é", "e")
+            .replace("í", "i").replace("ó", "o").replace("ú", "u")
+            .replace("aguilas", "aguilas").replace("rionegro", "")
+            .replace("doradas", "").strip())
+
+
+def _run_betplay(date_str: str) -> dict:
+    """Ejecuta el pipeline BetPlay y construye la respuesta JSON para el dashboard."""
+    from run_betplay_pipeline import run as betplay_run
+
+    result   = betplay_run(date_str)
     preds_df = result.get("predictions", pd.DataFrame())
     odds_df  = result.get("odds",        pd.DataFrame())
     vb_df    = result.get("value_bets",  pd.DataFrame())
@@ -1944,116 +1581,93 @@ def _run_atp(date_str: str) -> dict:
         }
 
     matches = []
+    # Map odds por nombre normalizado
+    odds_by_teams: dict[tuple, dict] = {}
+    if not odds_df.empty:
+        for _, o in odds_df.iterrows():
+            key = (_norm_team_name(o.get("home_team", "")),
+                   _norm_team_name(o.get("away_team", "")))
+            odds_by_teams[key] = o.to_dict()
+
+    # Map value bets por game_id de predicción
+    vbs_by_gid: dict[str, list] = {}
+    if not vb_df.empty:
+        for _, vb in vb_df.iterrows():
+            gid = str(vb.get("game_id", ""))
+            vbs_by_gid.setdefault(gid, []).append(vb.to_dict())
+
     for _, pred in preds_df.iterrows():
-        p1      = str(pred.get("player1_name", ""))
-        p2      = str(pred.get("player2_name", ""))
-        mid     = str(pred.get("match_id", ""))
-        surface = str(pred.get("surface", "Hard"))
-        tourney = str(pred.get("tourney_name", ""))
-        level   = str(pred.get("tourney_level", "A"))
+        gid   = str(pred.get("game_id", ""))
+        home  = str(pred.get("home_team", ""))
+        away  = str(pred.get("away_team", ""))
+        pdate = str(pred.get("game_date", date_str))[:10]
 
-        p1_prob     = round(float(pred.get("p1_win_prob", 0.5)) * 100, 1)
-        p2_prob     = round(float(pred.get("p2_win_prob", 0.5)) * 100, 1)
-        p1_elo_prob = round(float(pred.get("p1_elo_prob", 0.5)) * 100, 1)
-        p1_elo      = round(float(pred.get("p1_elo", 1500.0)), 0)
-        p2_elo      = round(float(pred.get("p2_elo", 1500.0)), 0)
-        elo_diff    = round(float(pred.get("elo_diff", 0.0)), 1)
-        method      = str(pred.get("method", "elo"))
+        yellow_prob = round(float(pred.get("over_yellow_prob", 0.5) or 0.5) * 100, 1)
+        corners_prob = round(float(pred.get("over_corners_prob", 0.5) or 0.5) * 100, 1)
+        over_yellow  = int(pred.get("over_yellow", 0) or 0)
+        over_corners = int(pred.get("over_corners", 0) or 0)
+        model_ver    = str(pred.get("model_version", "?"))
 
-        mp_raw = pred.get("model_prob")
-        model_prob = round(float(mp_raw) * 100, 1) if pd.notna(mp_raw) and mp_raw is not None else None
+        confidence = "Alta" if max(yellow_prob, corners_prob) >= 70 else \
+                     "Media" if max(yellow_prob, corners_prob) >= 60 else "Baja"
 
-        max_prob   = max(p1_prob, p2_prob)
-        confidence = "Alta" if max_prob >= 70 else "Media" if max_prob >= 60 else "Baja"
-        p1_is_fav  = p1_prob >= p2_prob
+        # Cuotas para este partido (por nombre de equipo)
+        match_odds: dict = {}
+        o_row = odds_by_teams.get((_norm_team_name(home), _norm_team_name(away)))
+        if o_row:
+            if pd.notna(o_row.get("corners_line")):
+                match_odds = {
+                    "corners_line":        float(o_row["corners_line"]),
+                    "corners_over_odds":   round(float(o_row["corners_over_odds"] or 0), 2),
+                    "corners_under_odds":  round(float(o_row["corners_under_odds"] or 0), 2),
+                    "cards_line":          float(o_row["cards_line"]) if pd.notna(o_row.get("cards_line")) else None,
+                    "cards_over_odds":     round(float(o_row["cards_over_odds"] or 0), 2) if pd.notna(o_row.get("cards_over_odds")) else None,
+                    "cards_under_odds":    round(float(o_row["cards_under_odds"] or 0), 2) if pd.notna(o_row.get("cards_under_odds")) else None,
+                }
 
-        # ── Cuotas para este partido ──────────────────────────────────────────
-        match_odds: list[dict] = []
-        best_p1: dict = {"bookmaker": "—", "odds": 0.0}
-        best_p2: dict = {"bookmaker": "—", "odds": 0.0}
-
-        if not odds_df.empty and "player1_name" in odds_df.columns:
-            p1_n = p1.lower()
-            p2_n = p2.lower()
-            mdf = odds_df[
-                (
-                    odds_df["player1_name"].str.lower().str.contains(p1_n, na=False) |
-                    odds_df["player2_name"].str.lower().str.contains(p1_n, na=False)
-                ) & (
-                    odds_df["player1_name"].str.lower().str.contains(p2_n, na=False) |
-                    odds_df["player2_name"].str.lower().str.contains(p2_n, na=False)
-                )
-            ]
-            for _, odd_row in mdf.iterrows():
-                inverted = p1_n in str(odd_row.get("player2_name", "")).lower()
-                if inverted:
-                    o1 = float(odd_row.get("player2_odds", 0) or 0)
-                    o2 = float(odd_row.get("player1_odds", 0) or 0)
-                else:
-                    o1 = float(odd_row.get("player1_odds", 0) or 0)
-                    o2 = float(odd_row.get("player2_odds", 0) or 0)
-                bm = str(odd_row.get("bookmaker", ""))
-                match_odds.append({
-                    "bookmaker": bm,
-                    "player1_odds": round(o1, 2),
-                    "player2_odds": round(o2, 2),
-                })
-                if o1 > best_p1["odds"]:
-                    best_p1 = {"bookmaker": bm, "odds": o1}
-                if o2 > best_p2["odds"]:
-                    best_p2 = {"bookmaker": bm, "odds": o2}
-
-        # ── Value bets para este partido ──────────────────────────────────────
+        # Value bets de este partido
         match_vbs: list[dict] = []
-        if not vb_df.empty and "match_id" in vb_df.columns:
-            for _, vb_row in vb_df[vb_df["match_id"] == mid].iterrows():
-                model_p  = float(vb_row.get("model_prob", 0) or 0)
-                market_o = float(vb_row.get("market_odds", 0) or 0)
-                val      = float(vb_row.get("value", 0) or 0)
-                kel      = float(vb_row.get("kelly_fraction", 0) or 0)
-                match_vbs.append({
-                    "player":         str(vb_row.get("player", "")),
-                    "bookmaker":      str(vb_row.get("bookmaker", "")),
-                    "market_odds":    round(market_o, 2),
-                    "model_prob_pct": round(model_p * 100, 1),
-                    "market_prob_pct": round((1 / market_o * 100) if market_o > 0 else 0, 1),
-                    "value_pct":      round(val * 100, 2),
-                    "kelly_fraction": round(kel, 4),
-                    "kelly_pct":      round(kel * 100, 3),
-                    "is_value_bet":   val >= 0.05,
-                })
+        for vb in vbs_by_gid.get(gid, []):
+            model_p = float(vb.get("model_prob", 0) or 0)
+            odds    = float(vb.get("odds", 0) or 0)
+            val     = float(vb.get("value", 0) or 0)
+            line    = vb.get("line")
+            match_vbs.append({
+                "market":        str(vb.get("market", "")),
+                "side":          str(vb.get("side", "")),
+                "line":          float(line) if line is not None else None,
+                "bookmaker":     str(vb.get("bookmaker", "Betplay")),
+                "market_odds":   round(odds, 2),
+                "model_prob_pct": round(model_p * 100, 1),
+                "market_prob_pct": round((1 / odds * 100) if odds > 0 else 0, 1),
+                "value_pct":     round(val * 100, 2),
+                "is_value_bet":  bool(vb.get("is_value_bet", False)),
+            })
 
         matches.append({
-            "match_id":          mid,
-            "player1":           p1,
-            "player2":           p2,
-            "surface":           surface,
-            "tourney_name":      tourney,
-            "tourney_level":     level,
-            "tourney_level_label": _ATP_LEVEL_LABELS.get(level, "ATP"),
-            "game_date":         str(pred.get("game_date", date_str))[:10],
-            "p1_win_prob":       p1_prob,
-            "p2_win_prob":       p2_prob,
-            "p1_elo_prob":       p1_elo_prob,
-            "p1_elo":            p1_elo,
-            "p2_elo":            p2_elo,
-            "elo_diff":          elo_diff,
-            "model_prob":        model_prob,
-            "method":            method,
-            "confidence":        confidence,
-            "p1_is_fav":         p1_is_fav,
-            "odds":              match_odds,
-            "best_odds":         {"player1": best_p1, "player2": best_p2},
-            "value_bets":        match_vbs,
-            "has_value":         any(v["is_value_bet"] for v in match_vbs),
+            "game_id":        gid,
+            "game_date":      pdate,
+            "home_team":      home,
+            "away_team":      away,
+            "home_abbr":      short_abbr(home),
+            "away_abbr":      short_abbr(away),
+            "over_yellow_prob": yellow_prob,
+            "over_corners_prob": corners_prob,
+            "over_yellow":    bool(over_yellow),
+            "over_corners":   bool(over_corners),
+            "model_version":  model_ver,
+            "confidence":     confidence,
+            "odds":           match_odds,
+            "value_bets":     match_vbs,
+            "has_value":      any(v["is_value_bet"] for v in match_vbs),
         })
 
     # Ordenar: value bets primero, luego por confianza
     conf_order = {"Alta": 0, "Media": 1, "Baja": 2}
     matches.sort(key=lambda m: (not m["has_value"], conf_order.get(m["confidence"], 3)))
 
-    all_vbs = [v for m in matches for v in m["value_bets"] if v["is_value_bet"]]
-    best_vb = max(all_vbs, key=lambda x: x["value_pct"], default=None)
+    all_vbs  = [v for m in matches for v in m["value_bets"] if v["is_value_bet"]]
+    best_vb  = max(all_vbs, key=lambda x: x["value_pct"], default=None)
 
     return {
         "date": date_str,
@@ -2062,177 +1676,330 @@ def _run_atp(date_str: str) -> dict:
             "total_matches":    len(matches),
             "value_bets_count": len(all_vbs),
             "best_opportunity": (
-                f"{best_vb['player']} @ {best_vb['bookmaker']} (+{best_vb['value_pct']:.1f}% EV)"
+                f"{best_vb['market']} {best_vb['side']} @ {best_vb['bookmaker']} (+{best_vb['value_pct']:.1f}% EV)"
                 if best_vb else None
             ),
         },
     }
 
 
-@app.get("/api/atp/analysis")
-def get_atp_analysis(date: Optional[str] = Query(default=None),
-                     bankroll: float = Query(default=500_000)):
-    """Ejecuta el pipeline ATP y devuelve predicciones + value bets del día."""
+def short_abbr(name: str) -> str:
+    """Abreviatura corta de un nombre de equipo (para chips compactos)."""
+    if not isinstance(name, str) or not name.strip():
+        return "?"
+    words = [w for w in name.split() if len(w) > 2 and not w.startswith(("de", "del", "d.", "s.", "la", "el"))]
+    if not words:
+        return name[:3].upper()
+    if len(words) == 1:
+        return words[0][:5].upper()
+    return (words[0][:4] + words[-1][:2]).upper()
+
+
+def _log_betplay_bets_to_journal(data: dict, bankroll: float) -> None:
+    """Guarda en output/betplay_bet_journal.csv las value bets BetPlay con datos suficientes.
+    Solo escribe entradas nuevas (no duplica si el (game_id, market, side) ya existe).
+    Limita el número de apuestas por día (MAX_BETS_PER_DAY) como en NBA."""
+    journal_path = os.path.join(_BASE_DIR, "output", "betplay_bet_journal.csv")
+    date_str     = data.get("date", "")
+    max_bets     = int(os.environ.get("MAX_BETS_PER_DAY", "5"))
+    max_exposure = float(os.environ.get("MAX_BANKROLL_EXPOSURE", "0.25"))
+
+    existing_keys: set[tuple] = set()
+    rows: list[dict] = []
+    if os.path.exists(journal_path):
+        try:
+            jdf = pd.read_csv(journal_path, dtype=str)
+            rows = jdf.to_dict("records")
+            existing_keys = {
+                (str(r.get("game_id", "")), str(r.get("market", "")), str(r.get("side", "")))
+                for r in rows
+            }
+        except Exception:
+            pass
+
+    today_bets = [r for r in rows if str(r.get("game_date", ""))[:10] == date_str]
+    slots_used = len(today_bets)
+
+    candidates: list[dict] = []
+    for game in data.get("matches", []):
+        gid = str(game.get("game_id", ""))
+        if not gid:
+            continue
+        # Best value bet per market/side
+        best_per_market: dict[tuple, dict] = {}
+        for vb in game.get("value_bets", []):
+            if not vb.get("is_value_bet"):
+                continue
+            k = (str(vb.get("market", "")), str(vb.get("side", "")))
+            if k not in best_per_market or vb["value_pct"] > best_per_market[k]["value_pct"]:
+                best_per_market[k] = vb
+        for (market, side), vb in best_per_market.items():
+            if (gid, market, side) in existing_keys:
+                continue
+            candidates.append({
+                "game_id":        gid,
+                "game_date":      date_str,
+                "logged_date":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "home_team":      game.get("home_team", ""),
+                "away_team":      game.get("away_team", ""),
+                "market":         market,
+                "side":           side,
+                "line":           vb.get("line"),
+                "model_version":  game.get("model_version", "?"),
+                "model_prob_pct": vb.get("model_prob_pct", 50),
+                "odds":           vb.get("market_odds", 0),
+                "value_pct":      vb.get("value_pct", 0),
+                "bankroll_snapshot": bankroll,
+                "_prob_sort":     vb.get("model_prob_pct", 50),
+            })
+            existing_keys.add((gid, market, side))
+
+    candidates.sort(key=lambda c: c["_prob_sort"], reverse=True)
+    max_new  = max(0, max_bets - slots_used)
+    selected = candidates[:max_new]
+
+    if candidates and not selected:
+        logger.warning(
+            "Límite diario alcanzado (%d apuestas para %s) — BetPlay: %d candidatas descartadas",
+            max_bets, date_str, len(candidates),
+        )
+
+    if selected:
+        budget = bankroll * max_exposure
+        total_conf = sum(max(1.0, float(c["model_prob_pct"])) for c in selected)
+        new_rows: list[dict] = []
+        for c in selected:
+            weight = max(1.0, float(c["model_prob_pct"])) / total_conf
+            bet_amount = max(1, round(budget * weight))
+            c["bet_amount"] = bet_amount
+            c["potential_gain"] = round(bet_amount * (float(c["odds"]) - 1)) if float(c["odds"]) > 1 else 0
+            c.pop("_prob_sort", None)
+            new_rows.append(c)
+        if new_rows:
+            all_rows = rows + new_rows
+            pd.DataFrame(all_rows).to_csv(journal_path, index=False)
+            logger.info(
+                "Journal BetPlay actualizado: %d nuevas apuestas para %s (límite %d/día). Exposición: %.1f%%",
+                len(new_rows), date_str, max_bets, max_exposure * 100,
+            )
+    else:
+        logger.warning("BetPlay: no se registraron nuevas apuestas para %s (límite o sin candidatas)", date_str)
+
+
+def _reconcile_betplay_results() -> int:
+    """Cruza las apuestas BetPlay pendientes con resultados reales desde ESPN summary.
+    Actualiza el journal con correct/actual (over/under reales de córners/tarjetas)."""
+    journal_path = os.path.join(_BASE_DIR, "output", "betplay_bet_journal.csv")
+    if not os.path.exists(journal_path):
+        return 0
+
+    try:
+        jdf = pd.read_csv(journal_path, dtype=str)
+    except Exception as exc:
+        logger.warning("BetPlay reconcile: no se pudo leer journal: %s", exc)
+        return 0
+    if jdf.empty:
+        return 0
+
+    from sports.betplay.ingestion.espn_client import get_match_summary
+
+    updated = 0
+    for i, row in jdf.iterrows():
+        if str(row.get("correct", "")).strip() in ("1", "0"):
+            continue  # ya reconciliado
+        if str(row.get("actual", "")).strip() not in ("", "nan"):
+            continue
+        gid       = str(row.get("game_id", ""))
+        market    = str(row.get("market", ""))
+        side      = str(row.get("side", ""))
+        if not gid:
+            continue
+        summary = get_match_summary(gid)
+        if not summary:
+            continue
+
+        if market == "corners":
+            total_val = summary.get("total_corners")
+        elif market == "cards":
+            total_val = summary.get("total_yellow_cards")
+        else:
+            total_val = None
+
+        if total_val is None:
+            continue
+
+        line = float(row.get("line", 0) or 0)
+        if line <= 0:
+            continue
+
+        # Over si total > línea
+        over_actual = total_val > line
+        if side == "over":
+            correct = over_actual
+        else:
+            correct = not over_actual
+
+        jdf.at[i, "correct"] = "1" if correct else "0"
+        jdf.at[i, "actual"]  = f"{total_val:g}" + (" (O)" if over_actual else " (U)")
+        updated += 1
+
+    if updated:
+        try:
+            jdf.to_csv(journal_path, index=False)
+            logger.info("BetPlay reconcile: %d apuestas actualizadas con resultado real", updated)
+        except Exception as exc:
+            logger.warning("BetPlay reconcile: no se pudo guardar journal: %s", exc)
+    return updated
+
+
+@app.get("/api/betplay/analysis")
+def get_betplay_analysis(date: Optional[str] = Query(default=None),
+                         bankroll: float = Query(default=500_000)):
+    """Ejecuta el pipeline BetPlay y devuelve predicciones + value bets del día."""
     import time
     date_str = date or _date_cls.today().isoformat()
 
-    cached = _ATP_CACHE.get(date_str)
-    if cached and (time.time() - cached["ts"]) < _ATP_CACHE_TTL:
+    cached = _BETPLAY_CACHE.get(date_str)
+    if cached and (time.time() - cached["ts"]) < _BETPLAY_CACHE_TTL:
         try:
-            _log_atp_bets_to_journal(cached["data"], bankroll)
+            _log_betplay_bets_to_journal(cached["data"], bankroll)
         except Exception:
             pass
         return cached["data"]
 
     try:
-        data = _run_atp(date_str)
-        _ATP_CACHE[date_str] = {"data": data, "ts": time.time()}
+        data = _run_betplay(date_str)
+        _BETPLAY_CACHE[date_str] = {"data": data, "ts": time.time()}
         try:
-            _log_atp_bets_to_journal(data, bankroll)
+            _log_betplay_bets_to_journal(data, bankroll)
         except Exception as log_exc:
-            logger.warning("ATP journal error: %s", log_exc)
+            logger.warning("BetPlay journal error: %s", log_exc)
     except Exception as exc:
-        logger.error("ATP pipeline error [%s]: %s", date_str, exc, exc_info=True)
+        logger.error("BetPlay pipeline error [%s]: %s", date_str, exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
 
-    return _ATP_CACHE[date_str]["data"]
+    return _BETPLAY_CACHE[date_str]["data"]
 
 
-@app.delete("/api/atp/cache")
-def clear_atp_cache(date: Optional[str] = Query(default=None)):
-    """Limpia la caché ATP."""
+@app.delete("/api/betplay/cache")
+def clear_betplay_cache(date: Optional[str] = Query(default=None)):
+    """Limpia la caché BetPlay."""
     if date:
-        _ATP_CACHE.pop(date, None)
+        _BETPLAY_CACHE.pop(date, None)
     else:
-        _ATP_CACHE.clear()
+        _BETPLAY_CACHE.clear()
     return {"status": "ok", "cleared": date or "all"}
 
 
-@app.get("/api/atp/reconcile")
-def reconcile_atp_results():
-    """Reconcilia resultados reales de apuestas ATP pasadas."""
+@app.get("/api/betplay/reconcile")
+def reconcile_betplay_results():
+    """Reconcilia resultados reales de apuestas BetPlay pasadas."""
     try:
-        updated = _fetch_and_reconcile_atp_results()
+        updated = _reconcile_betplay_results()
         return {"status": "ok", "bets_updated": updated}
     except Exception as exc:
-        logger.error("reconcile_atp_results error: %s", exc, exc_info=True)
+        logger.error("reconcile_betplay_results error: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.get("/api/atp/backtest")
-def get_atp_backtest(bankroll: float = Query(default=500_000), period: str = Query(default="all"),
-                    start_date: Optional[str] = Query(default=None), end_date: Optional[str] = Query(default=None)):
-    """Historial de apuestas ATP: reconcilia resultados reales y devuelve estadísticas."""
+@app.get("/api/betplay/backtest")
+def get_betplay_backtest(bankroll: float = Query(default=500_000), period: str = Query(default="all"),
+                         start_date: Optional[str] = Query(default=None), end_date: Optional[str] = Query(default=None)):
+    """Historial de apuestas BetPlay: reconcilia resultados reales y devuelve estadísticas."""
     try:
-        _fetch_and_reconcile_atp_results()
+        _reconcile_betplay_results()
     except Exception as exc:
-        logger.warning("ATP reconcile en backtest (no crítico): %s", exc)
+        logger.warning("BetPlay reconcile en backtest (no crítico): %s", exc)
 
-    journal_path = os.path.join(_BASE_DIR, "output", "atp_bet_journal.csv")
+    journal_path = os.path.join(_BASE_DIR, "output", "betplay_bet_journal.csv")
     if not os.path.exists(journal_path):
-        return {
-            "initial_bankroll": bankroll, "current_bankroll": bankroll,
-            "total_profit": 0, "total_bets": 0, "total_wins": 0,
-            "total_losses": 0, "win_rate": 0, "roi": 0, "strategy": "Kelly ½",
-            "models": {}, "daily": [], "sparkline": [], "pending_count": 0,
-            "empty": True, "sport": "atp",
-        }
+        return {"empty": True, "sport": "betplay"}
 
-    journal_df = pd.read_csv(journal_path)
+    try:
+        journal_df = pd.read_csv(journal_path, dtype=str)
+    except Exception:
+        return {"empty": True, "sport": "betplay"}
+    if journal_df.empty:
+        return {"empty": True, "sport": "betplay"}
 
-    # ── Meses disponibles (del historial completo, antes de filtrar) ─────────
-    available_months: list[str] = []
     if "game_date" in journal_df.columns:
-        available_months = sorted(
-            journal_df["game_date"].astype(str).str[:7].dropna().unique().tolist(),
-            reverse=True
-        )
+        dates = pd.to_datetime(journal_df["game_date"], errors="coerce")
+        today = _date_cls.today()
+        if period == "today":
+            journal_df = journal_df[dates == today.isoformat()]
+        elif period == "week":
+            journal_df = journal_df[dates >= (today - timedelta(days=7)).isoformat()]
+        elif period == "month":
+            journal_df = journal_df[dates >= (today - timedelta(days=30)).isoformat()]
+        if start_date:
+            journal_df = journal_df[dates >= pd.Timestamp(start_date)]
+        if end_date:
+            journal_df = journal_df[dates <= pd.Timestamp(end_date)]
 
-    # ── Filtro de período / fechas ───────────────────────────────────────────
-    if "game_date" in journal_df.columns:
-        dates = journal_df["game_date"].astype(str).str[:10]
-        if start_date or end_date:
-            if start_date:
-                journal_df = journal_df[dates >= start_date]
-            if end_date:
-                journal_df = journal_df[dates <= end_date]
-        elif period != "all":
-            today = _date_cls.today()
-            if period == "today":
-                journal_df = journal_df[dates == today.isoformat()]
-            elif period == "week":
-                journal_df = journal_df[dates >= (today - timedelta(days=7)).isoformat()]
-            elif period == "month":
-                journal_df = journal_df[dates >= (today - timedelta(days=30)).isoformat()]
+    if journal_df.empty:
+        return {"empty": True, "sport": "betplay"}
+
+    # meses disponibles (para chips)
+    all_dates  = pd.to_datetime(journal_df["game_date"], errors="coerce").dropna()
+    available_months = sorted({f"{d.year}-{d.month:02d}" for d in all_dates})
 
     records: list[dict] = []
     for _, row in journal_df.iterrows():
-        mid           = str(row.get("match_id", ""))
-        game_date     = str(row.get("game_date", ""))[:10]
-        p1            = str(row.get("player1_name", ""))
-        p2            = str(row.get("player2_name", ""))
-        predicted     = str(row.get("predicted_player", ""))
-        opponent      = str(row.get("opponent", ""))
-        model_v       = str(row.get("model_version", "atp_v4"))
-        odds_val      = float(row.get("market_odds", 1.91) or 1.91)
-        kelly_pct     = float(row.get("kelly_pct", 0) or 0)
-        model_prob_pct = float(row.get("model_prob_pct", 50) or 50)
-        bookmaker     = str(row.get("bookmaker", ""))
-        tourney       = str(row.get("tourney_name", ""))
-        surface       = str(row.get("surface", ""))
+        gid       = str(row.get("game_id", ""))
+        game_date = str(row.get("game_date", ""))[:10]
+        home      = str(row.get("home_team", ""))
+        away      = str(row.get("away_team", ""))
+        market    = str(row.get("market", ""))
+        side      = str(row.get("side", ""))
+        line      = row.get("line")
+        odds_val  = float(row.get("odds", 0) or 0)
+        prob_pct  = float(row.get("model_prob_pct", 50) or 50)
+        model_v   = str(row.get("model_version", "?"))
 
-        # Bet amounts — recalculate from current bankroll if not stored
         bet_amount = int(float(row.get("bet_amount", 0) or 0))
-        if bet_amount == 0 and kelly_pct > 0:
-            bet_amount = max(1, round(bankroll * kelly_pct / 200))
+        if bet_amount == 0:
+            bet_amount = max(1, round(bankroll * 0.05))
         pot_gain = int(float(row.get("potential_gain", 0) or 0))
         if pot_gain == 0 and odds_val > 1:
             pot_gain = round(bet_amount * (odds_val - 1))
 
-        correct_raw   = str(row.get("correct", "")).strip()
-        actual_winner = str(row.get("actual_winner", "")).strip()
-        pl_raw        = str(row.get("pl", "")).strip()
+        correct_raw = str(row.get("correct", "")).strip()
+        actual_raw  = str(row.get("actual", "")).strip()
 
         if correct_raw in ("", "nan"):
-            correct = None
-            pl      = None
-            status  = "pending"
+            correct, pl, status = None, None, "pending"
         else:
-            try:
-                correct = (int(float(correct_raw)) == 1)
-            except (ValueError, TypeError):
-                correct = False
-            if pl_raw and pl_raw not in ("nan", ""):
-                pl = round(float(pl_raw))
-            else:
-                pl = round(pot_gain) if correct else round(-bet_amount)
-            status = "win" if correct else "loss"
+            correct = (int(float(correct_raw)) == 1)
+            pl      = round(pot_gain) if correct else round(-bet_amount)
+            status  = "win" if correct else "loss"
+
+        market_label = "Córners" if market == "corners" else "Tarjetas" if market == "cards" else market
+        predicted = f"{market_label} {side.upper()} {float(line):g}" if line not in (None, "", "nan") else f"{market_label} {side.upper()}"
 
         records.append({
-            "match_id":       mid,
-            "game_date":      game_date,
-            "model":          model_v,
-            "player1":        p1,
-            "player2":        p2,
-            "predicted":      predicted,
-            "opponent":       opponent,
-            "actual":         actual_winner if actual_winner else None,
-            "correct":        correct,
-            "status":         status,
-            "tourney_name":   tourney,
-            "surface":        surface,
-            "bookmaker":      bookmaker,
-            "odds":           round(odds_val, 2),
-            "kelly_pct":      round(kelly_pct, 3),
-            "model_prob_pct": round(model_prob_pct, 1),
-            "bet_amount":     bet_amount,
+            "game_id":       gid,
+            "game_date":     game_date,
+            "model":         model_v,
+            "home_team":     home,
+            "away_team":     away,
+            "market":        market,
+            "side":          side,
+            "line":          float(line) if line not in (None, "", "nan") else None,
+            "predicted":     predicted,
+            "actual":        actual_raw if actual_raw not in ("", "nan") else None,
+            "correct":       correct,
+            "status":        status,
+            "bookmaker":     "Betplay",
+            "odds":          round(odds_val, 2),
+            "model_prob_pct": round(prob_pct, 1),
+            "bet_amount":    bet_amount,
             "potential_gain": pot_gain,
-            "pl":             pl,
+            "pl":            pl,
         })
 
-    records.sort(key=lambda x: (x["game_date"], x["match_id"]))
+    records.sort(key=lambda x: (x["game_date"], x["game_id"]))
 
-    # Running bankroll (resolved bets only)
+    # Running bankroll (resolved only)
     rb = bankroll
     for r in records:
         if r["status"] != "pending":
@@ -2305,50 +2072,25 @@ def get_atp_backtest(bankroll: float = Query(default=500_000), period: str = Que
         "sparkline":        [{"date": d["date"], "bankroll": d["running_bankroll"]}
                              for d in daily_list if not d["has_pending"]],
         "available_months": available_months,
-        "sport":            "atp",
+        "sport":            "betplay",
     }
 
 
-@app.delete("/api/journal/bet")
-def delete_nba_bet(
-    game_id:        str = Query(...),
-    predicted_side: str = Query(...),
-    bet_type:       str = Query(...),
+@app.delete("/api/betplay/journal/bet")
+def delete_betplay_bet(
+    game_id: str = Query(...),
+    market:  str = Query(...),
+    side:    str = Query(...),
 ):
-    """Elimina una apuesta específica del historial NBA (bet_journal.csv)."""
-    journal_path = os.path.join(_BASE_DIR, "output", "bet_journal.csv")
+    """Elimina una apuesta específica del historial BetPlay (betplay_bet_journal.csv)."""
+    journal_path = os.path.join(_BASE_DIR, "output", "betplay_bet_journal.csv")
     if not os.path.exists(journal_path):
-        raise HTTPException(status_code=404, detail="Historial NBA no encontrado")
-    df = pd.read_csv(journal_path, dtype=str)
-    # Normalizar game_id: quitar ceros iniciales para comparar "0042500311" == "42500311"
-    norm = lambda s: s.astype(str).str.lstrip("0")
-    mask = (
-        (norm(df["game_id"]) == str(game_id).lstrip("0")) &
-        (df["predicted_side"].astype(str) == str(predicted_side)) &
-        (df["bet_type"].astype(str) == str(bet_type))
-    )
-    if not mask.any():
-        raise HTTPException(status_code=404, detail="Apuesta no encontrada")
-    df = df[~mask]
-    df.to_csv(journal_path, index=False)
-    return {"status": "ok", "deleted": int(mask.sum())}
-
-
-@app.delete("/api/atp/journal/bet")
-def delete_atp_bet(
-    match_id:         str = Query(...),
-    predicted_player: str = Query(...),
-    bookmaker:        str = Query(...),
-):
-    """Elimina una apuesta específica del historial ATP (atp_bet_journal.csv)."""
-    journal_path = os.path.join(_BASE_DIR, "output", "atp_bet_journal.csv")
-    if not os.path.exists(journal_path):
-        raise HTTPException(status_code=404, detail="Historial ATP no encontrado")
+        raise HTTPException(status_code=404, detail="Historial BetPlay no encontrado")
     df = pd.read_csv(journal_path, dtype=str)
     mask = (
-        (df["match_id"].astype(str) == str(match_id)) &
-        (df["predicted_player"].astype(str) == str(predicted_player)) &
-        (df["bookmaker"].astype(str) == str(bookmaker))
+        (df["game_id"].astype(str) == str(game_id)) &
+        (df["market"].astype(str) == str(market)) &
+        (df["side"].astype(str) == str(side))
     )
     if not mask.any():
         raise HTTPException(status_code=404, detail="Apuesta no encontrada")

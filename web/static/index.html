@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Betplay Analytics — NBA + ATP</title>
+  <title>Betplay Analytics — NBA + BetPlay</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
   <style>
     :root {
@@ -199,7 +199,7 @@
     .sport-tab.active { background:var(--accent); color:#fff; }
     .sport-tab:not(.active):hover { background:rgba(255,255,255,.05); color:var(--text); }
 
-    /* ── ATP cards ───────────────────────────────────────────────────────────── */
+    /* ── Liga BetPlay cards ──────────────────────────────────────────────────── */
     .surf-badge { font-size:10px; font-weight:800; padding:2px 9px; border-radius:12px; letter-spacing:.5px; white-space:nowrap; }
     .surf-clay  { background:rgba(181,101,29,.2);  color:#e07b30; border:1px solid rgba(181,101,29,.4); }
     .surf-hard  { background:rgba(21,101,192,.2);  color:#42a5f5; border:1px solid rgba(21,101,192,.4); }
@@ -207,31 +207,31 @@
     .level-badge { font-size:9px; font-weight:800; padding:2px 7px; border-radius:12px; letter-spacing:.6px; white-space:nowrap; }
     .level-gs   { background:rgba(255,215,64,.15); color:var(--yellow); border:1px solid rgba(255,215,64,.35); }
     .level-m1000{ background:rgba(68,138,255,.15); color:var(--blue);   border:1px solid rgba(68,138,255,.35); }
-    .level-atp  { background:rgba(138,143,168,.12);color:var(--text2);  border:1px solid var(--border); }
-    .atp-card { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; transition:transform .2s,border-color .2s; }
-    .atp-card:hover { transform:translateY(-2px); border-color:rgba(255,255,255,.13); }
-    .atp-card.has-value { border-color:rgba(0,230,118,.3); box-shadow:0 0 18px rgba(0,230,118,.07); }
-    .atp-match-hdr { display:flex; align-items:center; justify-content:space-between; padding:12px 16px 8px; border-bottom:1px solid var(--border); flex-wrap:wrap; gap:6px; }
-    .atp-tourney { display:flex; align-items:center; gap:6px; }
-    .atp-tourney-name { font-size:12px; font-weight:700; color:var(--text2); }
-    .atp-players { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:8px; padding:16px; }
-    .atp-player { display:flex; flex-direction:column; gap:2px; }
-    .atp-player.right { align-items:flex-end; text-align:right; }
-    .atp-player-name { font-size:15px; font-weight:700; line-height:1.2; }
-    .atp-player-prob { font-size:28px; font-weight:900; letter-spacing:-1px; line-height:1.1; }
-    .atp-player-elo  { font-size:10px; color:var(--text3); }
-    .atp-vs { text-align:center; }
-    .atp-elo-diff { font-size:11px; font-weight:600; color:var(--text3); white-space:nowrap; }
-    .atp-method-chip { font-size:9px; font-weight:800; padding:2px 6px; border-radius:8px; margin-top:2px; display:inline-block; }
+    .level-bp   { background:rgba(138,143,168,.12);color:var(--text2);  border:1px solid var(--border); }
+    .bp-card { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; transition:transform .2s,border-color .2s; }
+    .bp-card:hover { transform:translateY(-2px); border-color:rgba(255,255,255,.13); }
+    .bp-card.has-value { border-color:rgba(0,230,118,.3); box-shadow:0 0 18px rgba(0,230,118,.07); }
+    .bp-match-hdr { display:flex; align-items:center; justify-content:space-between; padding:12px 16px 8px; border-bottom:1px solid var(--border); flex-wrap:wrap; gap:6px; }
+    .bp-tourney { display:flex; align-items:center; gap:6px; }
+    .bp-tourney-name { font-size:12px; font-weight:700; color:var(--text2); }
+    .bp-players { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:8px; padding:16px; }
+    .bp-player { display:flex; flex-direction:column; gap:2px; }
+    .bp-player.right { align-items:flex-end; text-align:right; }
+    .bp-player-name { font-size:15px; font-weight:700; line-height:1.2; }
+    .bp-player-prob { font-size:28px; font-weight:900; letter-spacing:-1px; line-height:1.1; }
+    .bp-player-sub  { font-size:10px; color:var(--text3); }
+    .bp-vs { text-align:center; }
+    .bp-elodiff { font-size:11px; font-weight:600; color:var(--text3); white-space:nowrap; }
+    .bp-method-chip { font-size:9px; font-weight:800; padding:2px 6px; border-radius:8px; margin-top:2px; display:inline-block; }
     .method-blend { background:rgba(68,138,255,.15); color:var(--blue); border:1px solid rgba(68,138,255,.3); }
     .method-elo   { background:rgba(138,143,168,.12); color:var(--text2); border:1px solid var(--border); }
-    .atp-prob-bar-wrap { padding:2px 16px 14px; }
-    .atp-odds-section { border-top:1px solid var(--border); }
-    .atp-vb-section { border-top:1px solid var(--border); }
-    .atp-vb-banner { padding:12px 16px; background:linear-gradient(135deg,#0a1e14,#0d1e1a); border-bottom:1px solid rgba(0,230,118,.2); }
-    .atp-vb-banner .atp-vb-type { font-size:10px; font-weight:800; letter-spacing:.8px; color:var(--green); margin-bottom:4px; }
-    .atp-vb-banner .atp-vb-label { font-size:16px; font-weight:800; margin-bottom:4px; }
-    .atp-vb-banner .atp-vb-line  { font-size:12px; color:var(--text2); }
+    .bp-prob-bar-wrap { padding:2px 16px 14px; }
+    .bp-odds-section { border-top:1px solid var(--border); }
+    .bp-vb-section { border-top:1px solid var(--border); }
+    .bp-vb-banner { padding:12px 16px; background:linear-gradient(135deg,#0a1e14,#0d1e1a); border-bottom:1px solid rgba(0,230,118,.2); }
+    .bp-vb-banner .bp-vb-type { font-size:10px; font-weight:800; letter-spacing:.8px; color:var(--green); margin-bottom:4px; }
+    .bp-vb-banner .bp-vb-label { font-size:16px; font-weight:800; margin-bottom:4px; }
+    .bp-vb-banner .bp-vb-line  { font-size:12px; color:var(--text2); }
 
     ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: var(--bg); } ::-webkit-scrollbar-thumb { background: var(--bg-card2); border-radius: 3px; }
 
@@ -297,7 +297,7 @@
     <div class="logo">� <span>Betplay</span> Analytics</div>
     <div class="sport-tabs">
       <button class="sport-tab active" id="tabNba" onclick="switchSport('nba')">🏀 NBA</button>
-      <button class="sport-tab" id="tabAtp" onclick="switchSport('atp')">🎾 ATP</button>
+      <button class="sport-tab" id="tabBetplay" onclick="switchSport('betplay')">⚽ BetPlay</button>
     </div>
     <div class="header-spacer"></div>
     <input type="date" id="datePicker" class="date-picker">
@@ -319,11 +319,11 @@
     <div class="section-hdr" id="nbaGamesHdr">Análisis detallado por partido</div>
     <div id="gamesGrid" class="games-grid"></div>
   </div>
-  <!-- ATP (initially hidden) -->
-  <div id="atpSections" style="display:none">
-    <div id="atpStatsRow" class="stats-row"></div>
-    <div class="section-hdr">Partidos ATP del día</div>
-    <div id="atpGrid" class="games-grid"></div>
+  <!-- BetPlay (initially hidden) -->
+  <div id="betplaySections" style="display:none">
+    <div id="betplayStatsRow" class="stats-row"></div>
+    <div class="section-hdr">Partidos Liga BetPlay del día</div>
+    <div id="betplayGrid" class="games-grid"></div>
   </div>
 </main>
 
@@ -347,33 +347,33 @@
 </div>
 
 <footer style="text-align:center;padding:20px;color:var(--text3);font-size:11px;border-top:1px solid var(--border)">
-  Betplay Analytics · Kambi API (Betplay · Rushbet) · NBA StackingClassifier 66.2% · ATP StackingClassifier v2 64.0% val-2025
+  Betplay Analytics · Kambi API (Betplay · Rushbet) · NBA StackingClassifier 66.2% · Liga BetPlay XGBoost v2
 </footer>
 
 <script>
-let STATE = { data: null, atpData: null, bankroll: 500000, sport: 'nba', period: 'all', startDate: null, endDate: null };
+let STATE = { data: null, betplayData: null, bankroll: 500000, sport: 'nba', period: 'all', startDate: null, endDate: null };
 
 function switchSport(sport) {
   STATE.sport = sport;
   document.getElementById('tabNba').className = 'sport-tab' + (sport==='nba' ? ' active' : '');
-  document.getElementById('tabAtp').className = 'sport-tab' + (sport==='atp' ? ' active' : '');
+  document.getElementById('tabBetplay').className = 'sport-tab' + (sport==='betplay' ? ' active' : '');
   document.getElementById('nbaSections').style.display = sport==='nba' ? '' : 'none';
-  document.getElementById('atpSections').style.display = sport==='atp' ? '' : 'none';
+  document.getElementById('betplaySections').style.display = sport==='betplay' ? '' : 'none';
   const date = document.getElementById('datePicker').value;
-  if (sport === 'atp' && !STATE.atpData) loadATP(date);
+  if (sport === 'betplay' && !STATE.betplayData) loadBetplay(date);
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   const today = new Date().toISOString().split('T')[0];
   const dp = document.getElementById('datePicker');
   dp.value = today; dp.max = today;
-  dp.addEventListener('change', () => { const d = dp.value; if (STATE.sport==='nba') load(d); else loadATP(d); });
+  dp.addEventListener('change', () => { const d = dp.value; if (STATE.sport==='nba') load(d); else loadBetplay(d); });
   const bi = document.getElementById('bankrollInput');
   bi.value = STATE.bankroll;
   bi.addEventListener('input', () => {
     STATE.bankroll = parseInt(bi.value) || 500000;
     if (STATE.sport==='nba' && STATE.data) render(STATE.data);
-    if (STATE.sport==='atp' && STATE.atpData) renderATP(STATE.atpData);
+    if (STATE.sport==='betplay' && STATE.betplayData) renderBetplay(STATE.betplayData);
   });
   load(today);
 });
@@ -397,9 +397,9 @@ async function refresh() {
       await fetch(`/api/cache?date=${date}`, { method: 'DELETE' });
       await load(date);
     } else {
-      await fetch(`/api/atp/reconcile`);
-      await fetch(`/api/atp/cache?date=${date}`, { method: 'DELETE' });
-      await loadATP(date);
+      await fetch(`/api/betplay/reconcile`);
+      await fetch(`/api/betplay/cache?date=${date}`, { method: 'DELETE' });
+      await loadBetplay(date);
     }
   } catch(e) { showError(e.message); }
   finally { setLoading(false); }
@@ -797,28 +797,28 @@ function renderInjuries(g) {
     </div>`;
 }
 
-async function loadATP(date) {
-  setLoading(true, 'atp');
+async function loadBetplay(date) {
+  setLoading(true, 'betplay');
   try {
-    const r = await fetch(`/api/atp/analysis?date=${date}`);
+    const r = await fetch(`/api/betplay/analysis?date=${date}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
-    STATE.atpData = await r.json();
-    renderATP(STATE.atpData);
-  } catch(e) { showError(e.message, 'atp'); }
-  finally { setLoading(false, 'atp'); }
+    STATE.betplayData = await r.json();
+    renderBetplay(STATE.betplayData);
+  } catch(e) { showError(e.message, 'betplay'); }
+  finally { setLoading(false, 'betplay'); }
 }
 
-function renderATP(data) {
-  renderAtpStats(data.summary, data.date);
-  renderAtpMatches(data.matches);
+function renderBetplay(data) {
+  renderBetplayStats(data.summary, data.date);
+  renderBetplayMatches(data.matches);
 }
 
-function renderAtpStats(s, date) {
+function renderBetplayStats(s, date) {
   const d  = new Date(date + 'T12:00:00');
   const dl = d.toLocaleDateString('es-CO', { weekday:'long', day:'numeric', month:'long' });
-  document.getElementById('atpStatsRow').innerHTML = `
+  document.getElementById('betplayStatsRow').innerHTML = `
     <div class="stat-card s-blue">
-      <div class="s-label">Partidos ATP</div><div class="s-val">${s.total_matches}</div><div class="s-sub">${dl}</div>
+      <div class="s-label">Partidos Liga BetPlay</div><div class="s-val">${s.total_matches}</div><div class="s-sub">${dl}</div>
     </div>
     <div class="stat-card s-green">
       <div class="s-label">Value Bets</div><div class="s-val">${s.value_bets_count}</div><div class="s-sub">Oportunidades con valor</div>
@@ -830,38 +830,35 @@ function renderAtpStats(s, date) {
     </div>`;
 }
 
-function renderAtpMatches(matches) {
-  const grid = document.getElementById('atpGrid');
+function renderBetplayMatches(matches) {
+  const grid = document.getElementById('betplayGrid');
   if (!matches || matches.length === 0) {
-    grid.innerHTML = `<div class="empty-wrap"><div style="font-size:40px;margin-bottom:16px">🎾</div>Sin partidos ATP disponibles para esta fecha<br><div style="font-size:12px;color:var(--text3);margin-top:8px">Verifica que Betplay/Rushbet tengan cuotas publicadas</div></div>`;
+    grid.innerHTML = `<div class="empty-wrap"><div style="font-size:40px;margin-bottom:16px">⚽</div>Sin partidos Liga BetPlay para esta fecha<br><div style="font-size:12px;color:var(--text3);margin-top:8px">Verifica que el calendario tenga partidos (ESPN/Kambi)</div></div>`;
     return;
   }
-  grid.innerHTML = matches.map(m => atpCard(m, STATE.bankroll)).join('');
+  grid.innerHTML = matches.map(m => betplayCard(m, STATE.bankroll)).join('');
 }
 
-function atpCard(m, bankroll) {
-  const surfClass = {Clay:'surf-clay', Hard:'surf-hard', Grass:'surf-grass'}[m.surface] || 'surf-hard';
-  const lvlClass  = m.tourney_level==='G' ? 'level-gs' : m.tourney_level==='M' ? 'level-m1000' : 'level-atp';
-  const methClass = m.method==='blend' ? 'method-blend' : 'method-elo';
-  const methLabel = m.method==='blend' ? 'ML+Elo' : 'Solo Elo';
-  const fav1 = m.p1_is_fav;
-
-  // ── Tabla de cuotas ──────────────────────────────────────────────────────
+function betplayCard(m, bankroll) {
+  // ── Cuotas Over/Under ────────────────────────────────────────────────────
   let oddsHtml = '';
-  if (m.odds && m.odds.length > 0) {
-    const bp1 = m.best_odds.player1.odds, bp2 = m.best_odds.player2.odds;
-    const rows = m.odds.map(o => `
-      <div class="odds-row">
-        <div class="bm-name">${o.bookmaker}</div>
-        <div class="odd-val ${o.player1_odds===bp1?'best':''}">${ o.player1_odds.toFixed(2)}${o.player1_odds===bp1?'<small>↑</small>':''}</div>
-        <div class="odd-val ${o.player2_odds===bp2?'best':''}">${ o.player2_odds.toFixed(2)}${o.player2_odds===bp2?'<small>↑</small>':''}</div>
-      </div>`).join('');
+  if (m.odds && m.odds.corners_line) {
+    const o = m.odds;
     oddsHtml = `
-      <div class="atp-odds-section">
-        <div class="sub-hdr"><span>Cuotas</span><span>${shortName(m.player1)} | ${shortName(m.player2)}</span></div>
+      <div class="bp-odds-section">
+        <div class="sub-hdr"><span>Cuotas córners (línea ${o.corners_line})</span><span>${shortName(m.home_team)} | ${shortName(m.away_team)}</span></div>
         <div class="odds-table">
-          <div class="odds-row hdr"><div>Casa</div><div style="text-align:center">${shortName(m.player1)}</div><div style="text-align:center">${shortName(m.player2)}</div></div>
-          ${rows}
+          <div class="odds-row hdr"><div>Mercado</div><div style="text-align:center">Over</div><div style="text-align:center">Under</div></div>
+          <div class="odds-row">
+            <div class="bm-name">Córners ${o.corners_line}</div>
+            <div class="odd-val">${o.corners_over_odds.toFixed(2)}</div>
+            <div class="odd-val">${o.corners_under_odds.toFixed(2)}</div>
+          </div>
+          ${o.cards_line ? `<div class="odds-row">
+            <div class="bm-name">Tarjetas ${o.cards_line}</div>
+            <div class="odd-val">${(o.cards_over_odds||0).toFixed(2)}</div>
+            <div class="odd-val">${(o.cards_under_odds||0).toFixed(2)}</div>
+          </div>` : ''}
         </div>
       </div>`;
   }
@@ -871,65 +868,61 @@ function atpCard(m, bankroll) {
   let vbListHtml   = '';
   const topVb = m.value_bets.find(v => v.is_value_bet);
   if (topVb) {
-    const half = bankroll && topVb.kelly_pct > 0 ? Math.round(bankroll * topVb.kelly_pct / 200) : 0;
+    const half = bankroll && topVb.value_pct > 0 ? Math.round(bankroll * 0.05) : 0;
+    const marketLabel = topVb.market === 'corners' ? 'Córners' : topVb.market === 'cards' ? 'Tarjetas' : topVb.market;
     vbBannerHtml = `
-      <div class="atp-vb-banner">
-        <div class="atp-vb-type">📈 VALUE BET DETECTADO</div>
-        <div class="atp-vb-label">APOSTAR A: ${topVb.player}</div>
-        <div class="atp-vb-line">▶ ${topVb.bookmaker} · Cuota ${topVb.market_odds} · EV +${topVb.value_pct.toFixed(1)}% · Modelo ${topVb.model_prob_pct}% vs implícita ${topVb.market_prob_pct}%</div>
-        ${half>0?`<div class="atp-vb-line" style="color:var(--accent);font-weight:700;margin-top:4px">▶ Apostar ${fmt(half)} (½ Kelly) · Ganancia potencial: +${fmt(Math.round(half*(topVb.market_odds-1)))}</div>`:''}
+      <div class="bp-vb-banner">
+        <div class="bp-vb-type">📈 VALUE BET DETECTADO</div>
+        <div class="bp-vb-label">APOSTAR A: ${marketLabel} ${topVb.side.toUpperCase()} ${topVb.line ? topVb.line : ''}</div>
+        <div class="bp-vb-line">▶ ${topVb.bookmaker} · Cuota ${topVb.market_odds} · EV +${topVb.value_pct.toFixed(1)}% · Modelo ${topVb.model_prob_pct}% vs implícita ${topVb.market_prob_pct}%</div>
       </div>`;
     const allItems = m.value_bets.map(v => {
-      const h2 = bankroll && v.kelly_pct > 0 ? Math.round(bankroll * v.kelly_pct / 200) : 0;
+      const ml = v.market === 'corners' ? 'Córners' : v.market === 'cards' ? 'Tarjetas' : v.market;
       return `
         <div class="vb-item ${v.is_value_bet?'is-vb':''}">
           <div class="vb-top">
-            <div><div class="vb-team">${v.player}</div><div class="vb-book">${v.bookmaker} · cuota ${v.market_odds.toFixed(2)}</div></div>
+            <div><div class="vb-team">${ml} ${v.side.toUpperCase()}${v.line ? ' ' + v.line : ''}</div><div class="vb-book">${v.bookmaker} · cuota ${v.market_odds.toFixed(2)}</div></div>
             <span class="ev-pill ${v.value_pct>0?'ev-pos':'ev-neg'}">${v.value_pct>0?'+':''}${v.value_pct.toFixed(1)}% EV</span>
           </div>
           <div class="vb-stats">
             <div class="vb-stat"><div class="vs-lbl">Prob. modelo</div><div class="vs-val">${v.model_prob_pct}%</div></div>
             <div class="vb-stat"><div class="vs-lbl">Prob. cuota</div><div class="vs-val">${v.market_prob_pct}%</div></div>
-            ${h2>0?`<div class="vb-stat"><div class="vs-lbl">½ Kelly</div><div class="vs-val kelly-amt">${fmt(h2)}</div></div>`:''}
           </div>
-          ${v.is_value_bet&&h2>0?`<div class="kelly-box">Apostar <strong>${fmt(h2)}</strong> · Ganancia si gana: <strong>+${fmt(Math.round(h2*(v.market_odds-1)))}</strong></div>`:''}
         </div>`;
     }).join('');
-    vbListHtml = `<div class="atp-vb-section"><div class="sub-hdr"><span>Análisis de valor detallado</span></div><div class="vb-list">${allItems}</div></div>`;
+    vbListHtml = `<div class="bp-vb-section"><div class="sub-hdr"><span>Análisis de valor detallado</span></div><div class="vb-list">${allItems}</div></div>`;
   }
 
   return `
-    <div class="atp-card ${m.has_value?'has-value':''}">
+    <div class="bp-card ${m.has_value?'has-value':''}">
       ${vbBannerHtml}
-      <div class="atp-match-hdr">
-        <div class="atp-tourney">
-          <span class="atp-tourney-name">${m.tourney_name}</span>
-          <span class="surf-badge ${surfClass}">${m.surface}</span>
-          <span class="level-badge ${lvlClass}">${m.tourney_level_label}</span>
+      <div class="bp-match-hdr">
+        <div class="bp-tourney">
+          <span class="bp-tourney-name">Liga BetPlay</span>
+          <span class="surf-badge surf-hard">Fútbol</span>
+          <span class="level-badge level-bp">${m.confidence}</span>
         </div>
         <div style="font-size:11px;color:var(--text3)">${m.game_date}</div>
       </div>
-      <div class="atp-players">
-        <div class="atp-player">
-          <div class="atp-player-name">${m.player1}</div>
-          <div class="atp-player-prob ${fav1?'prob-fav':'prob-dog'}">${m.p1_win_prob}%</div>
-          <div class="atp-player-elo">Elo ${m.p1_elo}</div>
+      <div class="bp-players">
+        <div class="bp-player">
+          <div class="bp-player-name">${m.home_team}</div>
+          <div class="bp-player-prob ${m.over_corners?'prob-fav':'prob-dog'}">C ${m.over_corners_prob}%</div>
+          <div class="bp-player-sub">Tarjetas ${m.over_yellow_prob}%</div>
         </div>
-        <div class="atp-vs">
+        <div class="bp-vs">
           <div class="vs-txt">VS</div>
-          <div class="atp-elo-diff">${m.elo_diff > 0 ? '+' : ''}${m.elo_diff}</div>
-          <div><span class="atp-method-chip ${methClass}">${methLabel}</span></div>
+          <div class="bp-elodiff">${m.over_yellow?'Y':'y'}${m.over_corners?'C':'c'}</div>
         </div>
-        <div class="atp-player right">
-          <div class="atp-player-name">${m.player2}</div>
-          <div class="atp-player-prob ${!fav1?'prob-fav':'prob-dog'}">${m.p2_win_prob}%</div>
-          <div class="atp-player-elo">Elo ${m.p2_elo}</div>
+        <div class="bp-player right">
+          <div class="bp-player-name">${m.away_team}</div>
+          <div class="bp-player-prob ${!m.over_corners?'prob-fav':'prob-dog'}">U ${(100-m.over_corners_prob).toFixed(1)}%</div>
         </div>
       </div>
-      <div class="atp-prob-bar-wrap">
+      <div class="bp-prob-bar-wrap">
         <div class="prob-bar">
-          <div class="pb-home" style="width:${m.p1_win_prob}%"></div>
-          <div class="pb-away" style="width:${m.p2_win_prob}%"></div>
+          <div class="pb-home" style="width:${m.over_corners_prob}%"></div>
+          <div class="pb-away" style="width:${100-m.over_corners_prob}%"></div>
         </div>
       </div>
       ${oddsHtml}
@@ -947,15 +940,15 @@ function setLoading(val, sport) {
       document.getElementById('planSection').innerHTML='';
       document.getElementById('gamesGrid').innerHTML=`<div class="loading-wrap"><div class="spinner"></div><div>Ejecutando pipeline NBA...</div><div style="font-size:12px;color:var(--text3);margin-top:6px">Consultando Kambi API + Modelo ML (~30s)</div></div>`;
     } else {
-      document.getElementById('atpStatsRow').innerHTML='';
-      document.getElementById('atpGrid').innerHTML=`<div class="loading-wrap"><div class="spinner"></div><div>Ejecutando pipeline ATP...</div><div style="font-size:12px;color:var(--text3);margin-top:6px">Consultando Kambi API (Betplay + Rushbet) + Modelo StackingClassifier v2 (17 features)</div></div>`;
+      document.getElementById('betplayStatsRow').innerHTML='';
+      document.getElementById('betplayGrid').innerHTML=`<div class="loading-wrap"><div class="spinner"></div><div>Ejecutando pipeline Liga BetPlay...</div><div style="font-size:12px;color:var(--text3);margin-top:6px">Consultando ESPN + Modelo XGBoost (tarjetas/córners) + Kambi</div></div>`;
     }
   } else { btn.disabled=false; btn.textContent='⟳ Actualizar'; }
 }
 
 function showError(msg, sport) {
   const s = sport || STATE.sport;
-  const id = s==='atp' ? 'atpGrid' : 'gamesGrid';
+  const id = s==='betplay' ? 'betplayGrid' : 'gamesGrid';
   document.getElementById(id).innerHTML=`<div class="error-wrap"><div style="font-size:36px;margin-bottom:12px">⚠️</div><div style="font-size:15px;font-weight:600;margin-bottom:6px">Error al cargar</div><div style="color:var(--text3)">${msg}</div><button class="btn" style="margin-top:16px" onclick="refresh()">Reintentar</button></div>`;
 }
 
@@ -963,9 +956,9 @@ function showError(msg, sport) {
 function openResults() {
   const sport = STATE.sport;
   const title = document.getElementById('resultsModalTitle');
-  if (title) title.textContent = sport === 'atp' ? '🎾 Resultados ATP' : '📊 Resultados NBA';
+  if (title) title.textContent = sport === 'betplay' ? '⚽ Resultados Liga BetPlay' : '📊 Resultados NBA';
   document.getElementById('resultsModal').style.display = 'flex';
-  if (sport === 'atp') loadAtpBacktest(STATE.period); else loadBacktest(STATE.period);
+  if (sport === 'betplay') loadBetplayBacktest(STATE.period); else loadBacktest(STATE.period);
 }
 function closeResults() {
   document.getElementById('resultsModal').style.display = 'none';
@@ -977,7 +970,7 @@ function setPeriod(p) {
     if (btn) btn.className = 'period-btn' + (id === p ? ' active' : '');
   });
   document.querySelectorAll('.month-chip').forEach(b => b.classList.remove('active'));
-  if (STATE.sport === 'atp') loadAtpBacktest(p); else loadBacktest(p);
+  if (STATE.sport === 'betplay') loadBetplayBacktest(p); else loadBacktest(p);
 }
 
 function setMonth(ym) {
@@ -993,7 +986,7 @@ function setMonth(ym) {
   const start = `${ym}-01`;
   const end   = `${ym}-${String(new Date(y, m, 0).getDate()).padStart(2,'0')}`;
   STATE.startDate = start; STATE.endDate = end;
-  if (STATE.sport === 'atp') loadAtpBacktest('all', start, end); else loadBacktest('all', start, end);
+  if (STATE.sport === 'betplay') loadBetplayBacktest('all', start, end); else loadBacktest('all', start, end);
 }
 
 function updateMonthChips(months) {
@@ -1035,29 +1028,29 @@ async function loadBacktest(period = 'all', startDate = null, endDate = null) {
   }
 }
 
-async function loadAtpBacktest(period = 'all', startDate = null, endDate = null) {
+async function loadBetplayBacktest(period = 'all', startDate = null, endDate = null) {
   STATE.period = period; STATE.startDate = startDate; STATE.endDate = endDate;
-  document.getElementById('resultsBody').innerHTML = '<div class="loading-wrap"><div class="spinner"></div><p>Calculando resultados ATP…<br><small style="color:var(--text3)">Cruzando con dataset real de Sackmann</small></p></div>';
+  document.getElementById('resultsBody').innerHTML = '<div class="loading-wrap"><div class="spinner"></div><p>Calculando resultados Liga BetPlay…<br><small style="color:var(--text3)">Cruzando con resultados reales de ESPN</small></p></div>';
   try {
     const br = STATE.bankroll || 500000;
-    let url = `/api/atp/backtest?bankroll=${br}&period=${period}`;
+    let url = `/api/betplay/backtest?bankroll=${br}&period=${period}`;
     if (startDate) url += `&start_date=${startDate}`;
     if (endDate)   url += `&end_date=${endDate}`;
     const r  = await fetch(url);
     if (!r.ok) throw new Error(await r.text());
-    renderAtpBacktest(await r.json());
+    renderBetplayBacktest(await r.json());
   } catch(e) {
     document.getElementById('resultsBody').innerHTML = `<div class="error-wrap">⚠ ${e.message}</div>`;
   }
 }
 
-function renderAtpBacktest(d) {
+function renderBetplayBacktest(d) {
   if (d.empty) {
     document.getElementById('resultsBody').innerHTML = `
       <div style="text-align:center;padding:60px 20px;color:var(--text3)">
-        <div style="font-size:48px;margin-bottom:16px">🎾</div>
-        <div style="font-size:15px;font-weight:600;margin-bottom:8px">Sin historial ATP aún</div>
-        <div style="font-size:13px">Consulta el análisis ATP para registrar las primeras apuestas.<br>Al día siguiente se cruzarán automáticamente con los resultados reales.</div>
+        <div style="font-size:48px;margin-bottom:16px">⚽</div>
+        <div style="font-size:15px;font-weight:600;margin-bottom:8px">Sin historial Liga BetPlay aún</div>
+        <div style="font-size:13px">Consulta el análisis Liga BetPlay para registrar las primeras apuestas.<br>Al día siguiente se cruzarán automáticamente con los resultados reales.</div>
       </div>`;
     return;
   }
@@ -1091,7 +1084,7 @@ function renderAtpBacktest(d) {
 
   const models = `
     <div class="bt-models-wrap">
-      <div class="bt-sec-hdr">Rendimiento por versión de modelo ATP</div>
+      <div class="bt-sec-hdr">Rendimiento por versión de modelo Liga BetPlay</div>
       <table class="bt-table">
         <thead><tr><th>Modelo</th><th>Apuestas</th><th>Ganadas</th><th>Perdidas</th><th>Acierto</th><th>P&amp;L</th><th>ROI</th></tr></thead>
         <tbody>${mvRows}</tbody>
@@ -1105,32 +1098,32 @@ function renderAtpBacktest(d) {
     const dLabel = new Date(day.date+'T12:00:00').toLocaleDateString('es-CO',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
 
     const betsHtml = day.bets.map(b => {
-      const delAtp = `<button class="bt-del-btn" title="Eliminar apuesta" onclick="deleteAtpBet('${b.match_id}','${b.predicted.replace(/'/g,"\\'")}','${b.bookmaker}')">&#10005;</button>`;
+      const delBet = `<button class="bt-del-btn" title="Eliminar apuesta" onclick="deleteBetplayBet('${b.game_id}','${b.market}','${b.side}')">&#10005;</button>`;
       if (b.status === 'pending') {
         return `
           <div class="bt-bet-row pending">
             <div>
-              <div class="bt-bet-game">${b.predicted} vs ${b.opponent} <span style="font-size:10px;color:var(--text3)">${b.tourney_name} · ${b.surface}</span></div>
-              <div class="bt-bet-sub">▶ Apuesta a: <strong>${b.predicted}</strong> (${b.model_prob_pct}%) · ${b.bookmaker} @ ${b.odds} · Kelly ${b.kelly_pct}% · Apostar: ${fmt(b.bet_amount)} &nbsp;·&nbsp; Ganancia si gana: +${fmt(b.potential_gain)}</div>
+              <div class="bt-bet-game">${b.home_team} vs ${b.away_team} <span style="font-size:10px;color:var(--text3)">${b.game_date}</span></div>
+              <div class="bt-bet-sub">▶ Apuesta a: <strong>${b.predicted}</strong> (${b.model_prob_pct}%) · ${b.bookmaker} @ ${b.odds} · Apostar: ${fmt(b.bet_amount)} &nbsp;·&nbsp; Ganancia si gana: +${fmt(b.potential_gain)}</div>
             </div>
             <div class="bt-bet-result" style="color:var(--accent)">⏳ PENDIENTE</div>
             <div class="bt-bet-mv"><span class="mv-chip">${b.model}</span></div>
             <div class="bt-bet-odds">×${b.odds}</div>
             <div class="bt-bet-pl-val" style="color:var(--text3)">?</div>
-            ${delAtp}
+            ${delBet}
           </div>`;
       }
       return `
         <div class="bt-bet-row ${b.correct?'win':'loss'}">
           <div>
-            <div class="bt-bet-game">${b.predicted} vs ${b.opponent} <span style="font-size:10px;color:var(--text3)">${b.tourney_name} · ${b.surface}</span></div>
-            <div class="bt-bet-sub">▶ Apostado a: <strong>${b.predicted}</strong> (${b.model_prob_pct}%) · ${b.bookmaker} @ ${b.odds} · Kelly ${b.kelly_pct}% · Apostado: ${fmt(b.bet_amount)} &nbsp;·&nbsp; ${b.correct?'Ganancia: +'+fmt(b.potential_gain):'Pérdida: -'+fmt(b.bet_amount)}</div>
+            <div class="bt-bet-game">${b.home_team} vs ${b.away_team} <span style="font-size:10px;color:var(--text3)">${b.game_date}</span></div>
+            <div class="bt-bet-sub">▶ Apostado a: <strong>${b.predicted}</strong> (${b.model_prob_pct}%) · ${b.bookmaker} @ ${b.odds} · Apostado: ${fmt(b.bet_amount)} &nbsp;·&nbsp; ${b.correct?'Ganancia: +'+fmt(b.potential_gain):'Pérdida: -'+fmt(b.bet_amount)}</div>
           </div>
           <div class="bt-bet-result ${b.correct?'ok':'ko'}">${b.correct?'✓ GANÓ':'✗ PERDIÓ'}<br><span style="font-size:10px;font-weight:400">${b.actual||'?'}</span></div>
           <div class="bt-bet-mv"><span class="mv-chip">${b.model}</span></div>
           <div class="bt-bet-odds">×${b.odds}</div>
           <div class="bt-bet-pl-val ${b.pl>=0?'pos':'neg'}">${sign(b.pl)}${fmt(b.pl)}</div>
-          ${delAtp}
+          ${delBet}
         </div>`;
     }).join('');
 
@@ -1146,7 +1139,7 @@ function renderAtpBacktest(d) {
 
   document.getElementById('resultsBody').innerHTML =
     summary + chart + models +
-    `<div class="bt-sec-hdr" style="margin-top:24px">Historial diario de apuestas ATP</div>` +
+    `<div class="bt-sec-hdr" style="margin-top:24px">Historial diario de apuestas Liga BetPlay</div>` +
     `<div id="btDailyList">${dailyHtml}</div>`;
   updateMonthChips(d.available_months || []);
 }
@@ -1313,12 +1306,12 @@ async function loadModelRegistry() {
   }
 }
 
-async function deleteAtpBet(matchId, predictedPlayer, bookmaker) {
-  if (!confirm(`¿Eliminar esta apuesta del historial ATP?\n${predictedPlayer} · ${bookmaker}`)) return;
-  const params = new URLSearchParams({ match_id: matchId, predicted_player: predictedPlayer, bookmaker });
-  const r = await fetch(`/api/atp/journal/bet?${params}`, { method: 'DELETE' });
+async function deleteBetplayBet(gameId, market, side) {
+  if (!confirm(`¿Eliminar esta apuesta del historial Liga BetPlay?\n${gameId} · ${market} · ${side}`)) return;
+  const params = new URLSearchParams({ game_id: gameId, market, side });
+  const r = await fetch(`/api/betplay/journal/bet?${params}`, { method: 'DELETE' });
   if (!r.ok) { alert('Error al eliminar: ' + await r.text()); return; }
-  loadAtpBacktest(STATE.period, STATE.startDate, STATE.endDate);
+  loadBetplayBacktest(STATE.period, STATE.startDate, STATE.endDate);
 }
 
 async function deleteNbaBet(gameId, predictedSide, betType) {
