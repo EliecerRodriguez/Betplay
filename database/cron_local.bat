@@ -7,15 +7,14 @@ REM
 REM   -- Eliminar tareas anteriores (si existen) --
 REM   schtasks /delete /tn "Betplay Pipeline"  /f
 REM   schtasks /delete /tn "Betplay Reconcile" /f
-REM   schtasks /delete /tn "Betplay ATP"       /f
 REM
 REM   -- Crear tareas nuevas --
 REM   NBA: reconciliar resultados de ayer a las 06:00, predicciones a las 06:30
 REM   schtasks /create /tn "Betplay Reconcile" /tr "cmd /c cd /d C:\Betplay && python reconcile.py >> logs\cron.log 2>&1"          /sc daily /st 06:00 /ru SYSTEM /f
 REM   schtasks /create /tn "Betplay Pipeline"  /tr "cmd /c cd /d C:\Betplay && python run_pipeline.py >> logs\cron.log 2>&1"        /sc daily /st 06:30 /ru SYSTEM /f
 REM
-REM   ATP: predicciones a las 19:00 (partidos ya en curso al mediodía, actualizar por la tarde)
-REM   schtasks /create /tn "Betplay ATP"       /tr "cmd /c cd /d C:\Betplay && python run_atp_pipeline.py >> logs\cron_atp.log 2>&1" /sc daily /st 19:00 /ru SYSTEM /f
+REM   Liga BetPlay: pipeline diario a las 07:00 (resultados ESPN + cuotas Kambi)
+REM   schtasks /create /tn "Betplay Liga"      /tr "cmd /c cd /d C:\Betplay && python run_betplay_pipeline.py >> logs\cron_betplay.log 2>&1" /sc daily /st 07:00 /ru SYSTEM /f
 REM =============================================================================
 
 SET BETPLAY_DIR=C:\Betplay
@@ -45,10 +44,10 @@ IF %HOUR% EQU 6 (
     GOTO END
 )
 
-IF %HOUR% EQU 19 (
-    REM 19:00 — Pipeline de predicciones ATP del dia
-    echo [%DATE% %TIME%] Ejecutando pipeline ATP... >> %LOG_DIR%\cron_atp.log 2>&1
-    %PYTHON% run_atp_pipeline.py >> %LOG_DIR%\cron_atp.log 2>&1
+IF %HOUR% EQU 7 (
+    REM 07:00 — Pipeline de predicciones Liga BetPlay del dia
+    echo [%DATE% %TIME%] Ejecutando pipeline Liga BetPlay... >> %LOG_DIR%\cron_betplay.log 2>&1
+    %PYTHON% run_betplay_pipeline.py >> %LOG_DIR%\cron_betplay.log 2>&1
     GOTO END
 )
 
