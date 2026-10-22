@@ -78,9 +78,13 @@ def build_team_averages(matches_df: pd.DataFrame) -> pd.DataFrame:
     return avgs
 
 
-def parse_form(form_str: str) -> float:
+def parse_form(form_str) -> float:
     """Convierte la forma W/D/L en una puntuación: W=3, D=1, L=0 (promedio)."""
-    if not form_str or form_str in ("nan", ""):
+    # Manejar NaN numérico (parquet reading) y None
+    if form_str is None or pd.isna(form_str):
+        return 0.5  # neutral
+    form_str = str(form_str).strip()
+    if form_str in ("nan", "", "None"):
         return 0.5  # neutral
     scores = []
     for c in str(form_str):
@@ -93,9 +97,13 @@ def parse_form(form_str: str) -> float:
     return float(np.mean(scores)) if scores else 0.5
 
 
-def parse_record(record_str: str) -> float:
+def parse_record(record_str) -> float:
     """Convierte record 'W-L-D' en win% (0-1)."""
-    if not record_str or record_str in ("nan", ""):
+    # Manejar NaN numérico (parquet reading) y None
+    if record_str is None or pd.isna(record_str):
+        return 0.5
+    record_str = str(record_str).strip()
+    if record_str in ("nan", "", "None"):
         return 0.5
     parts = record_str.replace(" ", "").split("-")
     if len(parts) != 3:
