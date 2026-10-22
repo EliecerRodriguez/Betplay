@@ -24,8 +24,9 @@ ESPN_DELAY = float(os.getenv("ESPN_DELAY", "0.5"))  # rate-limit amistoso
 BETPLAY_CACHE_DIR = os.getenv("BETPLAY_CACHE_DIR", "data/betplay_cache")
 BETPLAY_STATS_CACHE = os.getenv("BETPLAY_STATS_CACHE", "data/betplay_stats")
 
-# Año desde el cual se construye el dataset histórico
-BETPLAY_HISTORY_START = int(os.getenv("BETPLAY_HISTORY_START", "2025"))
+# Año desde el cual se construye el dataset histórico.
+# ESPN tiene stats de córners/tarjetas desde 2021 (verificado 2026-10-21).
+BETPLAY_HISTORY_START = int(os.getenv("BETPLAY_HISTORY_START", "2021"))
 
 # ── Kambi (Betplay / Rushbet) — fútbol ──────────────────────────────────────
 # Reutiliza el patrón del scraper ATP, adaptado a fútbol.
