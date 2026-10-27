@@ -1349,43 +1349,6 @@ def get_backtest(bankroll: float = Query(default=500_000), period: str = Query(d
 
     journal_df = pd.read_csv(journal_path)
 
-    # ── Recalcular montos con el bankroll actual (½ Kelly) ───────────────────
-    # Si el usuario cambió el bankroll, los montos guardados quedan obsoletos.
-    # Se recalculan con ½ Kelly y se persisten en el journal.
-    if not journal_df.empty and "kelly_pct" in journal_df.columns:
-        recalc_needed = False
-        for i, row in journal_df.iterrows():
-            snap_raw = row.get("bankroll_snapshot")
-            try:
-                snap = float(snap_raw) if pd.notna(snap_raw) and str(snap_raw).strip() not in ("", "nan") else 0
-            except (ValueError, TypeError):
-                snap = 0
-            if snap and abs(snap - bankroll) < 1:
-                continue  # ya calculado con este bankroll
-            kelly_raw = row.get("kelly_pct")
-            try:
-                kelly_pct = float(kelly_raw) if pd.notna(kelly_raw) and str(kelly_raw).strip() not in ("", "nan") else 0
-            except (ValueError, TypeError):
-                kelly_pct = 0
-            if kelly_pct <= 0:
-                continue
-            odds_raw = row.get("odds")
-            try:
-                odds = float(odds_raw) if pd.notna(odds_raw) and str(odds_raw).strip() not in ("", "nan") else 0
-            except (ValueError, TypeError):
-                odds = 0
-            new_amount = max(1, round(bankroll * kelly_pct / 200))  # ½ Kelly
-            journal_df.at[i, "bet_amount"] = new_amount
-            journal_df.at[i, "potential_gain"] = round(new_amount * (odds - 1)) if odds > 1 else 0
-            journal_df.at[i, "bankroll_snapshot"] = bankroll
-            recalc_needed = True
-        if recalc_needed:
-            try:
-                journal_df.to_csv(journal_path, index=False)
-                logger.info("backtest: montos recalculados con bankroll %s (½ Kelly)", bankroll)
-            except Exception as exc:
-                logger.warning("backtest: no se pudo guardar montos recalculados: %s", exc)
-
     # ── Meses disponibles (del historial completo, antes de filtrar) ─────────
     available_months: list[str] = []
     if "game_date" in journal_df.columns:
@@ -1441,6 +1404,56 @@ def get_backtest(bankroll: float = Query(default=500_000), period: str = Query(d
     # Enriquecer con resultados de Neon (tienen prioridad si estan disponibles)
     for gid, hw in db_results.items():
         actual_winner[gid] = "home" if hw == 1 else "away"
+
+    # ── Recalcular montos SOLO para apuestas PENDIENTES (½ Kelly) ────────────
+    # Las apuestas ya resueltas son HISTORIAL: nunca cambian, aunque el
+    # usuario cambie el bankroll. Solo las pendientes se recalculan con el
+    # bankroll actual y se persisten en el journal.
+    if not journal_df.empty and "kelly_pct" in journal_df.columns:
+        recalc_needed = False
+        # Normalizar game_ids (quitar ceros iniciales) para comparar con line_scores
+        normalized_winner = {str(g).lstrip("0") for g in actual_winner}
+        normalized_totals = {str(g).lstrip("0") for g in actual_totals}
+        for i, row in journal_df.iterrows():
+            gid = str(row.get("game_id", "")).lstrip("0")
+            bet_type = str(row.get("bet_type", "") or "moneyline")
+            # ¿Está resuelta?
+            if bet_type == "total":
+                resolved = gid in normalized_totals
+            else:
+                resolved = gid in normalized_winner
+            if resolved:
+                continue  # historial inmutable
+            snap_raw = row.get("bankroll_snapshot")
+            try:
+                snap = float(snap_raw) if pd.notna(snap_raw) and str(snap_raw).strip() not in ("", "nan") else 0
+            except (ValueError, TypeError):
+                snap = 0
+            if snap and abs(snap - bankroll) < 1:
+                continue  # ya calculado con este bankroll
+            kelly_raw = row.get("kelly_pct")
+            try:
+                kelly_pct = float(kelly_raw) if pd.notna(kelly_raw) and str(kelly_raw).strip() not in ("", "nan") else 0
+            except (ValueError, TypeError):
+                kelly_pct = 0
+            if kelly_pct <= 0:
+                continue
+            odds_raw = row.get("odds")
+            try:
+                odds = float(odds_raw) if pd.notna(odds_raw) and str(odds_raw).strip() not in ("", "nan") else 0
+            except (ValueError, TypeError):
+                odds = 0
+            new_amount = max(1, round(bankroll * kelly_pct / 200))  # ½ Kelly
+            journal_df.at[i, "bet_amount"] = new_amount
+            journal_df.at[i, "potential_gain"] = round(new_amount * (odds - 1)) if odds > 1 else 0
+            journal_df.at[i, "bankroll_snapshot"] = bankroll
+            recalc_needed = True
+        if recalc_needed:
+            try:
+                journal_df.to_csv(journal_path, index=False)
+                logger.info("backtest: montos de apuestas PENDIENTES recalculados con bankroll %s (½ Kelly)", bankroll)
+            except Exception as exc:
+                logger.warning("backtest: no se pudo guardar montos recalculados: %s", exc)
 
     # ── Construir registros desde el journal ──────────────────────────────────
     records: list[dict] = []
@@ -2071,11 +2084,17 @@ def get_betplay_backtest(bankroll: float = Query(default=500_000), period: str =
     if journal_df.empty:
         return {"empty": True, "sport": "betplay"}
 
-    # ── Recalcular montos con el bankroll actual (½ Kelly) ───────────────────
+    # ── Recalcular montos SOLO para apuestas PENDIENTES (½ Kelly) ────────────
+    # Las apuestas ya resueltas son HISTORIAL: nunca cambian, aunque el
+    # usuario cambie el bankroll. Solo las pendientes se recalculan con el
+    # bankroll actual y se persisten en el journal.
     # BetPlay no guarda kelly_pct; se deriva de model_prob_pct y odds.
     if "model_prob_pct" in journal_df.columns and "odds" in journal_df.columns:
         recalc_needed = False
         for i, row in journal_df.iterrows():
+            correct_raw = str(row.get("correct", "")).strip()
+            if correct_raw not in ("", "nan"):
+                continue  # historial inmutable (resuelta)
             snap_raw = row.get("bankroll_snapshot")
             try:
                 snap = float(snap_raw) if pd.notna(snap_raw) and str(snap_raw).strip() not in ("", "nan") else 0
@@ -2101,7 +2120,7 @@ def get_betplay_backtest(bankroll: float = Query(default=500_000), period: str =
         if recalc_needed:
             try:
                 journal_df.to_csv(journal_path, index=False)
-                logger.info("BetPlay backtest: montos recalculados con bankroll %s (½ Kelly)", bankroll)
+                logger.info("BetPlay backtest: montos de apuestas PENDIENTES recalculados con bankroll %s (½ Kelly)", bankroll)
             except Exception as exc:
                 logger.warning("BetPlay backtest: no se pudo guardar montos recalculados: %s", exc)
 
