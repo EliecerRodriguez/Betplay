@@ -56,6 +56,35 @@ _TEAMS_MAP: dict[int, str] = {t["id"]: t["full_name"] for t in nba_teams_static.
 # El bankroll se reinicia cada lunes con INITIAL_BANKROLL y acumula el
 # P&L de las apuestas de la semana actual.
 
+_BANKROLL_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "data", "bankroll.json")
+
+
+def _load_saved_bankroll() -> Optional[float]:
+    """Carga el bankroll guardado por el usuario (data/bankroll.json)."""
+    try:
+        if os.path.exists(_BANKROLL_FILE):
+            import json
+            with open(_BANKROLL_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            val = float(data.get("bankroll", 0) or 0)
+            return val if val > 0 else None
+    except Exception:
+        pass
+    return None
+
+
+def _save_bankroll(bankroll: float) -> None:
+    """Persiste el bankroll elegido por el usuario (data/bankroll.json)."""
+    try:
+        os.makedirs(os.path.dirname(_BANKROLL_FILE), exist_ok=True)
+        import json
+        with open(_BANKROLL_FILE, "w", encoding="utf-8") as f:
+            json.dump({"bankroll": float(bankroll), "updated_at": datetime.now().isoformat()}, f)
+    except Exception as exc:
+        logger.warning("No se pudo guardar bankroll: %s", exc)
+
+
 def _week_start(d: Optional[_date_cls] = None) -> _date_cls:
     """Devuelve el lunes de la semana de la fecha dada (default: hoy)."""
     d = d or _date_cls.today()
@@ -74,9 +103,14 @@ def _get_initial_bankroll() -> float:
 def _get_weekly_bankroll(bankroll_param: float) -> float:
     """
     Devuelve el bankroll efectivo para la semana actual.
-    Si INITIAL_BANKROLL está configurado (> 0), se usa ese como base semanal.
-    Si no (0), se usa el bankroll_param del frontend.
+    Prioridad:
+      1. Bankroll guardado por el usuario (data/bankroll.json) — persiste entre sesiones.
+      2. INITIAL_BANKROLL configurado (> 0).
+      3. bankroll_param del frontend.
     """
+    saved = _load_saved_bankroll()
+    if saved:
+        return saved
     initial = _get_initial_bankroll()
     return initial if initial > 0 else bankroll_param
 
@@ -1043,6 +1077,28 @@ def get_analysis(date: Optional[str] = Query(default=None),
     return _CACHE[date_str]["data"]
 
 
+@app.post("/api/bankroll")
+def set_bankroll(bankroll: float = Query(..., gt=0)):
+    """
+    Guarda el bankroll elegido por el usuario (persistente entre sesiones).
+
+    Se usa como base para calcular los montos de las apuestas (½ Kelly)
+    en el journal y en el backtest. Sobrescribe INITIAL_BANKROLL.
+    """
+    _save_bankroll(bankroll)
+    logger.info("Bankroll actualizado por el usuario: %s", bankroll)
+    return {"status": "ok", "bankroll": bankroll}
+
+
+@app.get("/api/bankroll")
+def get_bankroll():
+    """Devuelve el bankroll guardado por el usuario (si existe)."""
+    saved = _load_saved_bankroll()
+    if saved:
+        return {"status": "ok", "bankroll": saved, "source": "saved"}
+    return {"status": "ok", "bankroll": _get_initial_bankroll(), "source": "config"}
+
+
 @app.delete("/api/cache")
 def clear_cache(date: Optional[str] = Query(default=None)):
     """Limpia la caché (y el snapshot si existe) para forzar re-ejecución del pipeline."""
@@ -1245,6 +1301,10 @@ def get_accuracy():
 def get_backtest(bankroll: float = Query(default=500_000), period: str = Query(default="all"),
                  start_date: Optional[str] = Query(default=None), end_date: Optional[str] = Query(default=None)):
     """Historial real de apuestas: lee bet_journal.csv y cruza con line_scores para resultados."""
+    # Bankroll efectivo: el guardado por el usuario tiene prioridad
+    saved = _load_saved_bankroll()
+    if saved:
+        bankroll = saved
     # Reconciliar resultados antes de construir el historial (actualiza predictions.csv y line_scores.csv)
     try:
         _fetch_and_reconcile_results()
@@ -1288,6 +1348,43 @@ def get_backtest(bankroll: float = Query(default=500_000), period: str = Query(d
         }
 
     journal_df = pd.read_csv(journal_path)
+
+    # ── Recalcular montos con el bankroll actual (½ Kelly) ───────────────────
+    # Si el usuario cambió el bankroll, los montos guardados quedan obsoletos.
+    # Se recalculan con ½ Kelly y se persisten en el journal.
+    if not journal_df.empty and "kelly_pct" in journal_df.columns:
+        recalc_needed = False
+        for i, row in journal_df.iterrows():
+            snap_raw = row.get("bankroll_snapshot")
+            try:
+                snap = float(snap_raw) if pd.notna(snap_raw) and str(snap_raw).strip() not in ("", "nan") else 0
+            except (ValueError, TypeError):
+                snap = 0
+            if snap and abs(snap - bankroll) < 1:
+                continue  # ya calculado con este bankroll
+            kelly_raw = row.get("kelly_pct")
+            try:
+                kelly_pct = float(kelly_raw) if pd.notna(kelly_raw) and str(kelly_raw).strip() not in ("", "nan") else 0
+            except (ValueError, TypeError):
+                kelly_pct = 0
+            if kelly_pct <= 0:
+                continue
+            odds_raw = row.get("odds")
+            try:
+                odds = float(odds_raw) if pd.notna(odds_raw) and str(odds_raw).strip() not in ("", "nan") else 0
+            except (ValueError, TypeError):
+                odds = 0
+            new_amount = max(1, round(bankroll * kelly_pct / 200))  # ½ Kelly
+            journal_df.at[i, "bet_amount"] = new_amount
+            journal_df.at[i, "potential_gain"] = round(new_amount * (odds - 1)) if odds > 1 else 0
+            journal_df.at[i, "bankroll_snapshot"] = bankroll
+            recalc_needed = True
+        if recalc_needed:
+            try:
+                journal_df.to_csv(journal_path, index=False)
+                logger.info("backtest: montos recalculados con bankroll %s (½ Kelly)", bankroll)
+            except Exception as exc:
+                logger.warning("backtest: no se pudo guardar montos recalculados: %s", exc)
 
     # ── Meses disponibles (del historial completo, antes de filtrar) ─────────
     available_months: list[str] = []
@@ -1838,6 +1935,10 @@ def get_betplay_analysis(date: Optional[str] = Query(default=None),
     """Ejecuta el pipeline BetPlay y devuelve predicciones + value bets del día."""
     import time
     date_str = date or _date_cls.today().isoformat()
+    # Bankroll efectivo: el guardado por el usuario tiene prioridad
+    saved = _load_saved_bankroll()
+    if saved:
+        bankroll = saved
 
     cached = _BETPLAY_CACHE.get(date_str)
     if cached and (time.time() - cached["ts"]) < _BETPLAY_CACHE_TTL:
@@ -1950,6 +2051,10 @@ def get_betplay_model_registry():
 def get_betplay_backtest(bankroll: float = Query(default=500_000), period: str = Query(default="all"),
                          start_date: Optional[str] = Query(default=None), end_date: Optional[str] = Query(default=None)):
     """Historial de apuestas BetPlay: reconcilia resultados reales y devuelve estadísticas."""
+    # Bankroll efectivo: el guardado por el usuario tiene prioridad
+    saved = _load_saved_bankroll()
+    if saved:
+        bankroll = saved
     try:
         _reconcile_betplay_results()
     except Exception as exc:
@@ -1965,6 +2070,40 @@ def get_betplay_backtest(bankroll: float = Query(default=500_000), period: str =
         return {"empty": True, "sport": "betplay"}
     if journal_df.empty:
         return {"empty": True, "sport": "betplay"}
+
+    # ── Recalcular montos con el bankroll actual (½ Kelly) ───────────────────
+    # BetPlay no guarda kelly_pct; se deriva de model_prob_pct y odds.
+    if "model_prob_pct" in journal_df.columns and "odds" in journal_df.columns:
+        recalc_needed = False
+        for i, row in journal_df.iterrows():
+            snap_raw = row.get("bankroll_snapshot")
+            try:
+                snap = float(snap_raw) if pd.notna(snap_raw) and str(snap_raw).strip() not in ("", "nan") else 0
+            except (ValueError, TypeError):
+                snap = 0
+            if snap and abs(snap - bankroll) < 1:
+                continue
+            try:
+                prob_pct = float(row.get("model_prob_pct", 0) or 0)
+                odds = float(row.get("odds", 0) or 0)
+            except (ValueError, TypeError):
+                continue
+            if odds <= 1 or prob_pct <= 0:
+                continue
+            prob = prob_pct / 100.0
+            raw_kelly = (prob - 1 / odds) / (odds - 1)
+            half_kelly = max(0.0, raw_kelly / 2)
+            new_amount = max(1, round(bankroll * half_kelly))
+            journal_df.at[i, "bet_amount"] = new_amount
+            journal_df.at[i, "potential_gain"] = round(new_amount * (odds - 1))
+            journal_df.at[i, "bankroll_snapshot"] = bankroll
+            recalc_needed = True
+        if recalc_needed:
+            try:
+                journal_df.to_csv(journal_path, index=False)
+                logger.info("BetPlay backtest: montos recalculados con bankroll %s (½ Kelly)", bankroll)
+            except Exception as exc:
+                logger.warning("BetPlay backtest: no se pudo guardar montos recalculados: %s", exc)
 
     if "game_date" in journal_df.columns:
         dates = pd.to_datetime(journal_df["game_date"], errors="coerce")

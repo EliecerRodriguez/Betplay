@@ -340,6 +340,10 @@
       <button class="period-btn" id="pBtn-week" onclick="setPeriod('week')">7 días</button>
       <button class="period-btn" id="pBtn-month" onclick="setPeriod('month')">30 días</button>
       <button class="period-btn active" id="pBtn-all" onclick="setPeriod('all')">Todo</button>
+      <span style="width:1px;background:var(--border);margin:0 4px;align-self:stretch;flex-shrink:0"></span>
+      <label for="modalBankrollInput" style="font-size:11px;color:var(--text3);margin:0 4px">Bankroll $</label>
+      <input type="number" id="modalBankrollInput" class="bankroll-input" style="width:110px" min="1000" step="10000">
+      <button class="btn" id="btnModalRefresh" onclick="saveBankrollAndReload()" style="margin-left:6px">⟳ Actualizar</button>
     </div>
     <div class="modal-body" id="resultsBody">
       <div class="loading-wrap"><div class="spinner"></div><p>Cargando resultados…</p></div>
@@ -376,8 +380,45 @@ document.addEventListener('DOMContentLoaded', () => {
     if (STATE.sport==='nba' && STATE.data) render(STATE.data);
     if (STATE.sport==='betplay' && STATE.betplayData) renderBetplay(STATE.betplayData);
   });
+  // Cargar bankroll guardado por el usuario (persistente)
+  loadSavedBankroll();
   load(today);
 });
+
+// ── Bankroll persistente (guardado por el usuario) ─────────────────────────
+async function loadSavedBankroll() {
+  try {
+    const r = await fetch('/api/bankroll');
+    if (!r.ok) return;
+    const data = await r.json();
+    if (data.bankroll && data.bankroll > 0) {
+      STATE.bankroll = data.bankroll;
+      const bi = document.getElementById('bankrollInput');
+      if (bi) bi.value = data.bankroll;
+      const mb = document.getElementById('modalBankrollInput');
+      if (mb) mb.value = data.bankroll;
+    }
+  } catch(e) { /* silencioso */ }
+}
+
+async function saveBankrollAndReload() {
+  const mb = document.getElementById('modalBankrollInput');
+  const val = parseInt(mb.value) || 500000;
+  if (val < 1000) { alert('El bankroll mínimo es 1000'); return; }
+  STATE.bankroll = val;
+  const bi = document.getElementById('bankrollInput');
+  if (bi) bi.value = val;
+  try {
+    const r = await fetch(`/api/bankroll?bankroll=${val}`, { method: 'POST' });
+    if (!r.ok) throw new Error(await r.text());
+  } catch(e) {
+    alert('Error al guardar bankroll: ' + e.message);
+    return;
+  }
+  // Recargar el backtest con el nuevo bankroll (recalcula montos ½ Kelly)
+  if (STATE.sport === 'betplay') loadBetplayBacktest(STATE.period, STATE.startDate, STATE.endDate);
+  else loadBacktest(STATE.period, STATE.startDate, STATE.endDate);
+}
 
 async function load(date) {
   setLoading(true, 'nba');
@@ -1037,6 +1078,9 @@ function openResults() {
   const sport = STATE.sport;
   const title = document.getElementById('resultsModalTitle');
   if (title) title.textContent = sport === 'betplay' ? '⚽ Resultados Liga BetPlay' : '📊 Resultados NBA';
+  // Sincronizar el campo de bankroll del modal con el bankroll actual
+  const mb = document.getElementById('modalBankrollInput');
+  if (mb) mb.value = STATE.bankroll;
   document.getElementById('resultsModal').style.display = 'flex';
   if (sport === 'betplay') loadBetplayBacktest(STATE.period); else loadBacktest(STATE.period);
 }
