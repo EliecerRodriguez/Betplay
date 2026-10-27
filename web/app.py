@@ -650,7 +650,7 @@ def _build_response(date_str, games_df, predictions_df, odds_df, value_bets_df) 
 def _log_bets_to_journal(data: dict, bankroll: float) -> None:
     """Guarda en output/bet_journal.csv los partidos con valor detectado.
     Solo escribe entradas nuevas (no duplica si el (game_id, predicted_side) ya existe).
-    Expone a lo sumo MAX_BANKROLL_EXPOSURE del bankroll para no sobre-apostar."""
+    Monto por apuesta: ½ Kelly (consistente con el dashboard)."""
     BASE         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     journal_path = os.path.join(BASE, "output", "bet_journal.csv")
     date_str     = data.get("date", "")
@@ -659,7 +659,6 @@ def _log_bets_to_journal(data: dict, bankroll: float) -> None:
         model_ver = _latest_model_version()
     except Exception:
         model_ver = os.environ.get("MODEL_VERSION", "?")
-    max_exposure = float(os.environ.get("MAX_BANKROLL_EXPOSURE", "0.25"))
 
     # Leer journal existente
     existing_keys: set[tuple] = set()  # (game_id, predicted_side)
@@ -752,14 +751,11 @@ def _log_bets_to_journal(data: dict, bankroll: float) -> None:
     # ── Sin límite diario: se registran TODAS las candidatas con valor ───────
     selected = candidates
 
-    # ── Calcular montos: presupuesto = bankroll × exposición, repartido ──────
+    # ── Calcular montos: ½ Kelly (consistente con lo que muestra el dashboard) ─
     if selected:
-        budget = bankroll * max_exposure
-        # Peso: kelly_pct normalizado (las de mayor confianza reciben más)
-        total_kelly = sum(max(1.0, c["kelly_pct"]) for c in selected)
         for c in selected:
-            weight = max(1.0, c["kelly_pct"]) / total_kelly
-            bet_amount = max(1, round(budget * weight))
+            kelly_pct = float(c.get("kelly_pct", 0) or 0)
+            bet_amount = max(1, round(bankroll * kelly_pct / 200))  # Kelly ½
             c["bet_amount"] = bet_amount
             c["potential_gain"] = round(bet_amount * (c["odds"] - 1))
             # Eliminar campo interno de ordenación
@@ -770,9 +766,8 @@ def _log_bets_to_journal(data: dict, bankroll: float) -> None:
         all_rows = rows + new_rows
         pd.DataFrame(all_rows).to_csv(journal_path, index=False)
         logger.info(
-            "Journal actualizado: %d nuevas apuestas para %s. "
-            "Exposición total: %.1f%% del bankroll",
-            len(new_rows), date_str, max_exposure * 100,
+            "Journal actualizado: %d nuevas apuestas para %s (½ Kelly).",
+            len(new_rows), date_str,
         )
 
 
@@ -1690,7 +1685,6 @@ def _log_betplay_bets_to_journal(data: dict, bankroll: float) -> None:
     Solo escribe entradas nuevas (no duplica si el (game_id, market, side) ya existe)."""
     journal_path = os.path.join(_BASE_DIR, "output", "betplay_bet_journal.csv")
     date_str     = data.get("date", "")
-    max_exposure = float(os.environ.get("MAX_BANKROLL_EXPOSURE", "0.25"))
 
     existing_keys: set[tuple] = set()
     rows: list[dict] = []
@@ -1743,22 +1737,30 @@ def _log_betplay_bets_to_journal(data: dict, bankroll: float) -> None:
     selected = candidates
 
     if selected:
-        budget = bankroll * max_exposure
-        total_conf = sum(max(1.0, float(c["model_prob_pct"])) for c in selected)
         new_rows: list[dict] = []
         for c in selected:
-            weight = max(1.0, float(c["model_prob_pct"])) / total_conf
-            bet_amount = max(1, round(budget * weight))
+            # ½ Kelly (consistente con lo que muestra el dashboard)
+            kelly_pct = float(c.get("model_prob_pct", 50) or 50)
+            # BetPlay no calcula kelly_pct real; usar ½ Kelly aproximado:
+            # fracción = (prob - 1/odds) / (odds - 1) → mitad
+            odds = float(c.get("odds", 0) or 0)
+            if odds > 1:
+                prob = kelly_pct / 100.0
+                raw_kelly = (prob - 1 / odds) / (odds - 1)
+                half_kelly = max(0.0, raw_kelly / 2)
+            else:
+                half_kelly = 0.0
+            bet_amount = max(1, round(bankroll * half_kelly))
             c["bet_amount"] = bet_amount
-            c["potential_gain"] = round(bet_amount * (float(c["odds"]) - 1)) if float(c["odds"]) > 1 else 0
+            c["potential_gain"] = round(bet_amount * (odds - 1)) if odds > 1 else 0
             c.pop("_prob_sort", None)
             new_rows.append(c)
         if new_rows:
             all_rows = rows + new_rows
             pd.DataFrame(all_rows).to_csv(journal_path, index=False)
             logger.info(
-                "Journal BetPlay actualizado: %d nuevas apuestas para %s. Exposición: %.1f%%",
-                len(new_rows), date_str, max_exposure * 100,
+                "Journal BetPlay actualizado: %d nuevas apuestas para %s (½ Kelly).",
+                len(new_rows), date_str,
             )
     else:
         logger.warning("BetPlay: no se registraron nuevas apuestas para %s (sin candidatas)", date_str)
