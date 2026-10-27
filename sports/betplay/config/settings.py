@@ -44,7 +44,6 @@ from config.settings import (  # noqa: F401  (re-exports de config global)
     LOG_DIR,
     ODDS_API_KEY,
     ODDS_API_BASE_URL,
-    MAX_BETS_PER_DAY,
     MAX_BANKROLL_EXPOSURE,
     INITIAL_BANKROLL,
 )

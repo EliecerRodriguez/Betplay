@@ -41,8 +41,6 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_DIR   = os.getenv("LOG_DIR", "logs")
 
 # ── Gestión de riesgo ──────────────────────────────────────────────────────
-# Máximo de apuestas registradas por día (evita sobre-apostar el bankroll)
-MAX_BETS_PER_DAY = int(os.getenv("MAX_BETS_PER_DAY", "5"))
 # Fracción del bankroll máximo a exponer por día (0.25 = 25% del bankroll)
 MAX_BANKROLL_EXPOSURE = float(os.getenv("MAX_BANKROLL_EXPOSURE", "0.25"))
 # Bankroll inicial de cada semana (se reinicia cada lunes)

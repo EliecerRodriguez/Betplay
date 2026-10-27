@@ -650,8 +650,7 @@ def _build_response(date_str, games_df, predictions_df, odds_df, value_bets_df) 
 def _log_bets_to_journal(data: dict, bankroll: float) -> None:
     """Guarda en output/bet_journal.csv los partidos con valor detectado.
     Solo escribe entradas nuevas (no duplica si el (game_id, predicted_side) ya existe).
-    Limita el número de apuestas por día (MAX_BETS_PER_DAY) y expone a lo sumo
-    MAX_BANKROLL_EXPOSURE del bankroll para no sobre-apostar."""
+    Expone a lo sumo MAX_BANKROLL_EXPOSURE del bankroll para no sobre-apostar."""
     BASE         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     journal_path = os.path.join(BASE, "output", "bet_journal.csv")
     date_str     = data.get("date", "")
@@ -660,7 +659,6 @@ def _log_bets_to_journal(data: dict, bankroll: float) -> None:
         model_ver = _latest_model_version()
     except Exception:
         model_ver = os.environ.get("MODEL_VERSION", "?")
-    max_bets     = int(os.environ.get("MAX_BETS_PER_DAY", "5"))
     max_exposure = float(os.environ.get("MAX_BANKROLL_EXPOSURE", "0.25"))
 
     # Leer journal existente
@@ -676,13 +674,6 @@ def _log_bets_to_journal(data: dict, bankroll: float) -> None:
             }
         except Exception:
             pass
-
-    # Apuestas ya registradas HOY (para no exceder el límite diario acumulado)
-    today_bets = [
-        r for r in rows
-        if str(r.get("game_date", ""))[:10] == date_str
-    ]
-    slots_used = len(today_bets)
 
     logged_dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     new_rows: list[dict] = []
@@ -758,16 +749,8 @@ def _log_bets_to_journal(data: dict, bankroll: float) -> None:
             })
             existing_keys.add((gid, side))
 
-    # ── Aplicar límite: ordenar por confianza y quedarse con las mejores ──────
-    candidates.sort(key=lambda c: c["_prob_sort"], reverse=True)
-    max_new = max(0, max_bets - slots_used)
-    selected = candidates[:max_new]
-
-    if candidates and not selected:
-        logger.warning(
-            "Límite diario alcanzado (%d apuestas para %s) — %d candidatas descartadas",
-            max_bets, date_str, len(candidates),
-        )
+    # ── Sin límite diario: se registran TODAS las candidatas con valor ───────
+    selected = candidates
 
     # ── Calcular montos: presupuesto = bankroll × exposición, repartido ──────
     if selected:
@@ -782,19 +765,14 @@ def _log_bets_to_journal(data: dict, bankroll: float) -> None:
             # Eliminar campo interno de ordenación
             c.pop("_prob_sort", None)
             new_rows.append(c)
-    elif candidates:
-        logger.warning(
-            "No se registraron nuevas apuestas para %s (límite diario alcanzado o sin candidatas)",
-            date_str,
-        )
 
     if new_rows:
         all_rows = rows + new_rows
         pd.DataFrame(all_rows).to_csv(journal_path, index=False)
         logger.info(
-            "Journal actualizado: %d nuevas apuestas para %s (límite %d/día). "
+            "Journal actualizado: %d nuevas apuestas para %s. "
             "Exposición total: %.1f%% del bankroll",
-            len(new_rows), date_str, max_bets, max_exposure * 100,
+            len(new_rows), date_str, max_exposure * 100,
         )
 
 
@@ -1709,11 +1687,9 @@ def short_abbr(name: str) -> str:
 
 def _log_betplay_bets_to_journal(data: dict, bankroll: float) -> None:
     """Guarda en output/betplay_bet_journal.csv las value bets BetPlay con datos suficientes.
-    Solo escribe entradas nuevas (no duplica si el (game_id, market, side) ya existe).
-    Limita el número de apuestas por día (MAX_BETS_PER_DAY) como en NBA."""
+    Solo escribe entradas nuevas (no duplica si el (game_id, market, side) ya existe)."""
     journal_path = os.path.join(_BASE_DIR, "output", "betplay_bet_journal.csv")
     date_str     = data.get("date", "")
-    max_bets     = int(os.environ.get("MAX_BETS_PER_DAY", "5"))
     max_exposure = float(os.environ.get("MAX_BANKROLL_EXPOSURE", "0.25"))
 
     existing_keys: set[tuple] = set()
@@ -1728,9 +1704,6 @@ def _log_betplay_bets_to_journal(data: dict, bankroll: float) -> None:
             }
         except Exception:
             pass
-
-    today_bets = [r for r in rows if str(r.get("game_date", ""))[:10] == date_str]
-    slots_used = len(today_bets)
 
     candidates: list[dict] = []
     for game in data.get("matches", []):
@@ -1767,14 +1740,7 @@ def _log_betplay_bets_to_journal(data: dict, bankroll: float) -> None:
             existing_keys.add((gid, market, side))
 
     candidates.sort(key=lambda c: c["_prob_sort"], reverse=True)
-    max_new  = max(0, max_bets - slots_used)
-    selected = candidates[:max_new]
-
-    if candidates and not selected:
-        logger.warning(
-            "Límite diario alcanzado (%d apuestas para %s) — BetPlay: %d candidatas descartadas",
-            max_bets, date_str, len(candidates),
-        )
+    selected = candidates
 
     if selected:
         budget = bankroll * max_exposure
@@ -1791,11 +1757,11 @@ def _log_betplay_bets_to_journal(data: dict, bankroll: float) -> None:
             all_rows = rows + new_rows
             pd.DataFrame(all_rows).to_csv(journal_path, index=False)
             logger.info(
-                "Journal BetPlay actualizado: %d nuevas apuestas para %s (límite %d/día). Exposición: %.1f%%",
-                len(new_rows), date_str, max_bets, max_exposure * 100,
+                "Journal BetPlay actualizado: %d nuevas apuestas para %s. Exposición: %.1f%%",
+                len(new_rows), date_str, max_exposure * 100,
             )
     else:
-        logger.warning("BetPlay: no se registraron nuevas apuestas para %s (límite o sin candidatas)", date_str)
+        logger.warning("BetPlay: no se registraron nuevas apuestas para %s (sin candidatas)", date_str)
 
 
 def _reconcile_betplay_results() -> int:
