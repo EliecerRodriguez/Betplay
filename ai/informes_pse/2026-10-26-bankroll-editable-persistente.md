@@ -1,22 +1,24 @@
-# Informe PSE → PKE — Bankroll editable y persistente desde el modal de resultados
+# Informe PSE → PKE — Bankroll editable: solo las apuestas pendientes se recalculan
 
 **Fecha:** 2026-10-26
-**Tarea solicitada por el usuario:** Poder escribir el bankroll manualmente en la pestaña de resultados (con botón Actualizar), que las sugerencias de apuesta se recalculen con ese bankroll, se guarden y persistan hasta que el usuario lo cambie.
+**Tarea solicitada por el usuario:** Poder cambiar el bankroll desde el modal de resultados, pero que SOLO las apuestas pendientes se recalculen con el nuevo bankroll. Las ya cerradas son historial y nunca deben cambiar.
 
 ---
 
 ## 1. Objetivo del cambio
 
-Permitir al usuario definir su propio bankroll desde el modal de resultados. Al cambiarlo, los montos de las apuestas (½ Kelly) se recalculan, se guardan en el journal y el sistema trabaja con ese bankroll hasta que el usuario lo modifique.
+Permitir al usuario definir su bankroll desde el modal de resultados y que:
+- Las apuestas **pendientes** (sin resultado) se recalculen con el nuevo bankroll (½ Kelly) y se guarden.
+- Las apuestas **resueltas** (historial) queden **inmutables** — el dinero ganado/perdido ya pasó.
 
 ## 2. Archivos modificados
 
-- `web/app.py` — endpoints de bankroll, recálculo de montos en backtests.
-- `web/static/index.html` — campo de bankroll + botón Actualizar en el modal.
+- `web/app.py` — endpoints de bankroll, recálculo selectivo en backtests (`6426c88`).
+- `web/static/index.html` — campo de bankroll + botón Actualizar en el modal (`a85c8f7`).
 
 ## 3. Archivos creados
 
-- `data/bankroll.json` — persistencia del bankroll elegido por el usuario (creado en runtime).
+- `data/bankroll.json` — persistencia del bankroll del usuario.
 
 ## 4. Archivos eliminados
 
@@ -24,39 +26,38 @@ Ninguno.
 
 ## 5. Funcionalidades agregadas
 
-- **Backend**:
-  - `POST /api/bankroll?bankroll=N` — guarda el bankroll en `data/bankroll.json`.
-  - `GET /api/bankroll` — devuelve el guardado (o el de config).
-  - `_get_weekly_bankroll()` — prioriza el bankroll guardado por el usuario.
-  - `get_backtest()` y `get_betplay_backtest()` — usan el bankroll guardado y **recalculan los montos** de las apuestas (½ Kelly) si el `bankroll_snapshot` del journal difiere del actual, persistiendo `bet_amount`, `potential_gain` y `bankroll_snapshot`.
-- **Frontend**:
-  - Modal de resultados: campo "Bankroll $" editable + botón "⟳ Actualizar".
-  - `saveBankrollAndReload()` — guarda el bankroll (POST) y recarga el backtest.
-  - `loadSavedBankroll()` — carga el bankroll persistente al iniciar la app.
-  - El campo de bankroll del header se sincroniza con el del modal.
+- `POST /api/bankroll` — guarda el bankroll del usuario.
+- `GET /api/bankroll` — devuelve el guardado.
+- **Recálculo selectivo de montos**:
+  - **NBA**: se calculan los resultados reales (line_scores + Neon) ANTES del recálculo. Solo las apuestas sin resultado (pendientes) se recalculan con ½ Kelly. Las resueltas quedan intactas.
+  - **BetPlay**: solo las apuestas sin `correct` (pendientes) se recalculan.
+  - Normalización de game_ids (ceros iniciales) para comparar con line_scores/Neon.
+- Frontend: campo de bankroll + botón ⟳ Actualizar en el modal (la UI sincroniza el bankroll del header).
 
 ## 6. Funcionalidades eliminadas
 
-Ninguna.
+- El recálculo masivo (que alteraba el historial) del commit `a85c8f7`.
 
 ## 7. Cambios arquitectónicos
 
-- El bankroll ya no es solo un parámetro del frontend: ahora hay una **fuente de verdad persistente** (`data/bankroll.json`) que tiene prioridad sobre `INITIAL_BANKROLL` y sobre el parámetro del frontend.
-- Los montos de las apuestas ya no son inmutables: se recalculan con ½ Kelly cada vez que el bankroll cambia, y el journal se actualiza.
+- El bankroll es persistente (`data/bankroll.json`) y tiene prioridad sobre `INITIAL_BANKROLL`.
+- El journal distingue implícitamente resueltas vs pendientes: las resueltas conservan su `bankroll_snapshot` original; las pendientes se actualizan con el bankroll actual.
+- **Inmutabilidad del historial**: los montos y el P&L de apuestas cerradas nunca cambian al modificar el bankroll.
 
 ## 8. Módulos de la Base de Conocimiento posiblemente afectados
 
-- `web_dashboard.md` — nuevo campo de bankroll en el modal, persistencia.
-- `value_detection.md` — montos recalculados dinámicamente con el bankroll del usuario.
+- `web_dashboard.md` — campo bankroll en modal, recálculo solo de pendientes.
+- `value_detection.md` — montos ½ Kelly dinámicos solo para pendientes.
+- `database.md` — journal con resueltas inmutables.
 
 ## 9. Riesgos detectados
 
-- **Recálculo retroactivo**: al cambiar el bankroll, TODAS las apuestas del journal (incluidas las ya resueltas) se recalculan con el nuevo bankroll. Esto cambia el P&L histórico. Es el comportamiento pedido por el usuario ("se modifiquen mis apuestas y se guarden"), pero significa que el historial refleja el bankroll actual, no el que había en cada momento.
-- **`data/bankroll.json` no está versionado** (en `data/`, que está en `.gitignore` parcialmente): si se borra, el sistema vuelve a `INITIAL_BANKROLL`.
-- **BetPlay usa ½ Kelly derivado** (prob/cuota) porque su journal no guarda `kelly_pct` real.
+- **Primera versión (`a85c8f7`) alteró el historial**: recalcularon todas las apuestas al cambiar el bankroll. Se corrigió con `6426c88` y el journal se restauró (resueltas a 500000). El usuario lo detectó y se corrigió a tiempo.
+- **Detección de "resuelta" depende de line_scores/Neon**: si un partido pasó pero sus datos no llegaron, la apuesta se trata como pendiente y se recalcula — al llegar el resultado se resolverá con el monto actualizado.
+- **BetPlay usa ½ Kelly derivado** (prob/cuota) porque su journal no guarda kelly_pct real.
 
 ## 10. Recomendaciones de actualización para la Base de Conocimiento
 
-- Documentar en `web_dashboard.md` el nuevo flujo de bankroll (campo en modal → POST → persistencia → recálculo de montos).
-- Documentar que `data/bankroll.json` es la fuente de verdad del bankroll del usuario.
-- Nota: el recálculo retroactivo de montos es intencional (pedido por el usuario).
+- Documentar el flujo de bankroll en `web_dashboard.md` (campo en modal → POST → persistencia → recálculo solo de pendientes).
+- Documentar la inmutabilidad del historial: las apuestas resueltas conservan su bankroll_snapshot original.
+- Verificar que el valor por defecto sea 500000 (INITIAL_BANKROLL) si `data/bankroll.json` no existe.
